@@ -114,6 +114,13 @@ export default function App() {
   // Monitoraggio della larghezza dello schermo per la responsività dei menù
   useEffect(() => {
     function handleResize() {
+      useEffect(() => {
+  document.body.style.background =
+    currentTheme === "dark" ? "#080b10" : "#f3f6fb";
+
+  document.body.style.color =
+    currentTheme === "dark" ? "white" : "#111827";
+}, [currentTheme]);
       setIsMobile(window.innerWidth < 640);
     }
     handleResize();
@@ -587,7 +594,10 @@ export default function App() {
   }
 
   return (
-    <PageShell isMobile={isMobile}>
+    <PageShell
+  isMobile={isMobile}
+  currentTheme={currentTheme}
+>
       <header style={headerStyle}>
         <div>
           <h1 style={titleStyle}>Release The Creature</h1>
@@ -904,12 +914,25 @@ function AuthPanel({
   );
 }
 
-function PageShell({ children, center = false, isMobile = false }) {
+function PageShell({ children, center = false, isMobile = false, currentTheme = "dark" }) {
+
+  const themedPageStyle = {
+    ...pageStyle,
+    background:
+      currentTheme === "dark"
+        ? "linear-gradient(180deg,#080b10,#10161f 48%,#10131a)"
+        : "linear-gradient(180deg,#f4f7fb,#e8edf5 48%,#dfe7f2)",
+
+    color: currentTheme === "dark" ? "white" : "#111827",
+  };
+
   return (
-    <div style={{
-      ...pageStyle,
-      paddingBottom: isMobile ? 84 : 12 // Spazio extra in basso per non far coprire i contenuti dalla bottom bar mobile
-    }}>
+    <div
+      style={{
+        ...themedPageStyle,
+        paddingBottom: isMobile ? 84 : 12,
+      }}
+    >
       <main style={center ? centerShellStyle : shellStyle}>{children}</main>
     </div>
   );
@@ -1104,7 +1127,9 @@ function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStat
             </div>
             <button 
               type="button" 
-              onClick={() => alert("Tabella profili non rilevata nel database. Configura un trigger di Supabase per abilitare la modifica del nickname o dell'avatar!")}
+              onClick={() => {
+  alert("Sistema profilo in preparazione. Il database profiles esiste già, manca solo il collegamento frontend.");
+}}
               style={inlineSettingButtonStyle}
             >
               Modifica nome utente o avatar
