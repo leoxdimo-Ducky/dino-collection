@@ -3,6 +3,10 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  resolve: {
+    dedupe: ["react", "react-dom"],
+  },
+
   plugins: [
     react(),
 
@@ -10,10 +14,10 @@ export default defineConfig({
       registerType: "autoUpdate",
 
       manifest: {
-        name: "Dino Collection",
-        short_name: "DinoDex",
+        name: "Release The Creature",
+        short_name: "RTC",
         description:
-          "Colleziona dinosauri rari",
+          "Release The Creature — colleziona tutte le varianti",
 
         theme_color: "#0f172a",
         background_color: "#0f172a",
