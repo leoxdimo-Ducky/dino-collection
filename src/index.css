@@ -31,3 +31,39 @@ button:disabled {
 #root {
   min-height: 100vh;
 }
+
+/* ============================================================
+   ACCESSIBILITY MODE
+   ============================================================ */
+[data-a11y="1"] {
+  font-size: 18px !important;
+  line-height: 1.6 !important;
+}
+
+[data-a11y="1"] button,
+[data-a11y="1"] input,
+[data-a11y="1"] select {
+  min-height: 52px !important;
+  font-size: 17px !important;
+}
+
+[data-a11y="1"] [data-theme="dark"],
+[data-a11y="1"]:root {
+  --page-bg: #000000;
+  --surface-1: #111111;
+  --surface-2: #1a1a1a;
+  --text-primary: #ffffff;
+  --text-secondary: #dddddd;
+  --border: rgba(255,255,255,0.3);
+  --border-strong: rgba(255,255,255,0.5);
+}
+
+[data-theme="light"][data-a11y="1"] {
+  --page-bg: #ffffff;
+  --surface-1: #f0f0f0;
+  --surface-2: #e0e0e0;
+  --text-primary: #000000;
+  --text-secondary: #222222;
+  --border: rgba(0,0,0,0.3);
+  --border-strong: rgba(0,0,0,0.5);
+}

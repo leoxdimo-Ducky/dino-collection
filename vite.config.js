@@ -17,7 +17,7 @@ export default defineConfig({
         name: "Release The Creature",
         short_name: "RTC",
         description:
-          "Release The Creature — colleziona tutte le varianti",
+          "Release The Creature – colleziona tutte le varianti",
 
         theme_color: "#0f172a",
         background_color: "#0f172a",
@@ -30,7 +30,7 @@ export default defineConfig({
             sizes: "192x192",
             type: "image/png",
           },
-
+          
           {
             src: "/icon-512.png",
             sizes: "512x512",
