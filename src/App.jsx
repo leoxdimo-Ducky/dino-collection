@@ -78,6 +78,14 @@ const TOTAL_CARD_VARIANTS = COLLECTION_SECTIONS.reduce(
 
 const CUSTOM_CARD_PREFIX = "custom::";
 const FALLBACK_CARD_CATALOG = createFallbackCatalog();
+const PASSWORD_MIN_LENGTH = 10;
+const PASSWORD_PATTERN = "(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{10,}";
+const PASSWORD_REQUIREMENTS = "Minimo 10 caratteri, con maiuscola, minuscola, numero e simbolo.";
+const QUICK_MESSAGE_TEMPLATES = [
+  { code: "want_to_trade", text: "Ti va di fare uno scambio?" },
+  { code: "great_collection", text: "Complimenti per la tua collezione!" },
+  { code: "thanks", text: "Grazie per lo scambio!" },
+];
 
 // ============================================================
 // i18n
@@ -94,6 +102,7 @@ const T = {
     allSets: "Tutti i set",
     allRarities: "Tutte le rarità",
     collection: "Collezione",
+    duplicates: "Doppioni",
     friends: "Amici",
     progress: "Progressione",
     settings: "Impostazioni",
@@ -110,7 +119,7 @@ const T = {
     addDupe: "+1 doppione",
     removeDupe: "-1 doppione",
     friendsTitle: "Amici e Scambio",
-    friendSearch: "Cerca utente per email...",
+    friendSearch: "Cerca nickname esatto...",
     sendRequest: "Invia richiesta",
     accept: "Accetta",
     decline: "Rifiuta",
@@ -151,6 +160,7 @@ const T = {
     allSets: "All sets",
     allRarities: "All rarities",
     collection: "Collection",
+    duplicates: "Duplicates",
     friends: "Friends",
     progress: "Progress",
     settings: "Settings",
@@ -167,7 +177,7 @@ const T = {
     addDupe: "+1 dupe",
     removeDupe: "-1 dupe",
     friendsTitle: "Friends & Trading",
-    friendSearch: "Search user by email...",
+    friendSearch: "Search exact nickname...",
     sendRequest: "Send request",
     accept: "Accept",
     decline: "Decline",
@@ -241,6 +251,10 @@ export default function App() {
   const [friendSearchMsg, setFriendSearchMsg] = useState("");
   const [viewingFriend, setViewingFriend] = useState(null);
   const [friendStats, setFriendStats] = useState(null);
+  const [friendMessages, setFriendMessages] = useState([]);
+  const [friendMessagesBusy, setFriendMessagesBusy] = useState(false);
+  const [friendMessageSending, setFriendMessageSending] = useState("");
+  const [friendMessageStatus, setFriendMessageStatus] = useState("");
   const [snapshots, setSnapshots] = useState([]);
   const [confettiActive, setConfettiActive] = useState(false);
   const prevOwnedRef = React.useRef({});
@@ -303,14 +317,16 @@ export default function App() {
     );
   }, []);
   
-  const loadCards = useCallback(async (currentUser = user) => {
+  const loadCards = useCallback(async (currentUser = user, { showLoading = true } = {}) => {
     if (!currentUser) {
       setCards([]);
       setLoading(false);
       return;
     }
 
-    setLoading(true);
+    if (showLoading) {
+      setLoading(true);
+    }
 
     const { data, error } = await supabase
       .from("collections")
@@ -320,35 +336,22 @@ export default function App() {
 
     if (error) {
       setMessage("Non riesco a caricare la collezione.");
-      setCards([]);
+      if (showLoading) {
+        setCards([]);
+      }
     } else {
       setMessage("");
       setCards(data || []);
     }
 
-    setLoading(false);
-if (currentUser && data) {
-  saveSnapshot(currentUser, (data || []).length);
-}  }, [user, saveSnapshot]);
+    if (showLoading) {
+      setLoading(false);
+    }
 
-  // --- DOPPIONI ---
-  async function incrementDupe(variant) {
-    if (!user) return;
-    const existing = cards.find(c => c.card_id === variant.card_id);
-    if (!existing) { await addVariant(variant); return; }
-    const newDupes = (existing.dupes || 0) + 1;
-    await supabase.from("collections").update({ dupes: newDupes }).eq("user_id", user.id).eq("card_id", variant.card_id);
-    await loadCards();
-  }
-
-  async function decrementDupe(variant) {
-    if (!user) return;
-    const existing = cards.find(c => c.card_id === variant.card_id);
-    if (!existing) return;
-    const newDupes = Math.max(0, (existing.dupes || 0) - 1);
-    await supabase.from("collections").update({ dupes: newDupes }).eq("user_id", user.id).eq("card_id", variant.card_id);
-    await loadCards();
-  }
+    if (currentUser && data) {
+      saveSnapshot(currentUser, data.length);
+    }
+  }, [user, saveSnapshot]);
 
   const dupesMap = useMemo(() => {
     const m = new Map();
@@ -384,16 +387,29 @@ if (currentUser && data) {
     setFriendRequests(reqs || []);
   }, []);
 
-  async function searchFriendByEmail() {
+  async function searchFriendByNickname() {
     setFriendSearchBusy(true);
     setFriendSearchMsg("");
     setFriendSearchResult(null);
-    // search by username
-    const { data: byUsername } = await supabase.from("profiles").select("id,username").ilike("username", `%${friendSearchEmail.trim()}%`);
-    if (byUsername && byUsername.length > 0 && byUsername[0].id !== user.id) {
-      setFriendSearchResult(byUsername[0]);
+    const nickname = normalizeNickname(friendSearchEmail);
+
+    if (!nickname) {
+      setFriendSearchMsg("Inserisci il nickname esatto da cercare.");
+      setFriendSearchBusy(false);
+      return;
+    }
+
+    const { data: byNickname } = await supabase
+      .from("profiles")
+      .select("id,username")
+      .eq("nickname_key", nickname)
+      .neq("id", user.id)
+      .maybeSingle();
+
+    if (byNickname) {
+      setFriendSearchResult(byNickname);
     } else {
-      setFriendSearchMsg("Nessun utente trovato con quel nome.");
+      setFriendSearchMsg("Nessun utente trovato con questo nickname.");
     }
     setFriendSearchBusy(false);
   }
@@ -417,14 +433,58 @@ if (currentUser && data) {
   async function loadFriendStats(friendId) {
     const { data: cols } = await supabase.from("collections").select("card_id,rarity,dupes").eq("user_id", friendId);
     const { data: prof } = await supabase.from("profiles").select("username").eq("id", friendId).single();
-    const owned = (cols || []).length;
-    const dupes = (cols || []).reduce((a, c) => a + (c.dupes || 0), 0);
+    const friendCards = (cols || []).map((card) => mapOwnedCardToCatalog(card, cardCatalog));
+    const owned = friendCards.length;
+    const dupes = friendCards.reduce((a, c) => a + (c.dupes || 0), 0);
     const byRarity = RARITY_LABELS.reduce((acc, r) => {
-      acc[r] = (cols || []).filter(c => c.rarity === r).length;
+      acc[r] = friendCards.filter(c => c.rarity === r).length;
       return acc;
     }, {});
-    setFriendStats({ id: friendId, username: prof?.username || "Amico", owned, dupes, byRarity, cards: cols || [] });
+    setFriendStats({ id: friendId, username: prof?.username || "Amico", owned, dupes, byRarity, cards: friendCards });
     setViewingFriend(friendId);
+    await loadFriendMessages(friendId);
+  }
+
+  async function loadFriendMessages(friendId) {
+    if (!user || !friendId) return;
+    setFriendMessagesBusy(true);
+    setFriendMessageStatus("");
+
+    const { data, error } = await supabase
+      .from("friend_messages")
+      .select("id,sender_id,recipient_id,message_code,card_id,created_at")
+      .or(`and(sender_id.eq.${user.id},recipient_id.eq.${friendId}),and(sender_id.eq.${friendId},recipient_id.eq.${user.id})`)
+      .order("created_at", { ascending: true })
+      .limit(60);
+
+    if (error) {
+      setFriendMessages([]);
+      setFriendMessageStatus("Non riesco a caricare i messaggi.");
+    } else {
+      setFriendMessages(data || []);
+    }
+    setFriendMessagesBusy(false);
+  }
+
+  async function sendFriendMessage(friendId, messageCode, cardId = null) {
+    if (!user || !friendId) return;
+    const pendingKey = `${messageCode}:${cardId || ""}`;
+    setFriendMessageSending(pendingKey);
+    setFriendMessageStatus("");
+
+    const { error } = await supabase.from("friend_messages").insert({
+      sender_id: user.id,
+      recipient_id: friendId,
+      message_code: messageCode,
+      card_id: messageCode === "need_card" ? cardId : null,
+    });
+
+    if (error) {
+      setFriendMessageStatus("Non riesco a inviare il messaggio.");
+    } else {
+      await loadFriendMessages(friendId);
+    }
+    setFriendMessageSending("");
   }
 
   // --- EXPORT CSV ---
@@ -471,22 +531,22 @@ if (currentUser && data) {
     setAuthBusy(false);
   }
 
-  async function logout() {
-    await supabase.auth.signOut();
+  async function logout(scope = "global") {
+    await supabase.auth.signOut({ scope });
     setCards([]);
     setSearch("");
   }
 
-  const collectionCards = cards.map((card) => {
-    const rarity = normalizeRarity(card.rarity);
+  const collectionCards = cards.map((card) => mapOwnedCardToCatalog(card, cardCatalog));
 
-    return {
-      ...card,
-      card_id: card.card_id,
-      name: deriveNameFromCardId(card.card_id, rarity),
-      rarity,
-    };
-  });
+  const duplicateCards = collectionCards
+    .filter((card) => (card.dupes || 0) > 0)
+    .sort(
+      (first, second) =>
+        second.dupes - first.dupes ||
+        rarityIndex(first.rarity) - rarityIndex(second.rarity) ||
+        first.name.localeCompare(second.name)
+    );
 
   const catalogByNameRarity = useMemo(() => {
     const map = new Map();
@@ -667,6 +727,49 @@ if (currentUser && data) {
     Math.round((ownedCatalogVariantCount / TOTAL_CARD_VARIANTS) * 100)
   );
 
+  // --- DOPPIONI ---
+  async function incrementDupe(variant) {
+    if (!user || variantBusy) return;
+    const ownedSourceId = ownershipMap.get(variant.card_id);
+    const existing = cards.find((card) => card.card_id === ownedSourceId);
+    if (!existing) { await addVariant(variant); return; }
+    setVariantBusy(variant.card_id);
+    const newDupes = (existing.dupes || 0) + 1;
+    const { error } = await supabase
+      .from("collections")
+      .update({ dupes: newDupes })
+      .eq("user_id", user.id)
+      .eq("card_id", existing.card_id);
+    if (error) {
+      setMessage(`Non riesco ad aggiungere un doppione di ${variant.name}.`);
+    } else {
+      setMessage("");
+      await loadCards(user, { showLoading: false });
+    }
+    setVariantBusy("");
+  }
+
+  async function decrementDupe(variant) {
+    if (!user || variantBusy) return;
+    const ownedSourceId = ownershipMap.get(variant.card_id);
+    const existing = cards.find((card) => card.card_id === ownedSourceId);
+    if (!existing || (existing.dupes || 0) === 0) return;
+    setVariantBusy(variant.card_id);
+    const newDupes = Math.max(0, (existing.dupes || 0) - 1);
+    const { error } = await supabase
+      .from("collections")
+      .update({ dupes: newDupes })
+      .eq("user_id", user.id)
+      .eq("card_id", existing.card_id);
+    if (error) {
+      setMessage(`Non riesco a rimuovere un doppione di ${variant.name}.`);
+    } else {
+      setMessage("");
+      await loadCards(user, { showLoading: false });
+    }
+    setVariantBusy("");
+  }
+
   async function addVariant(variant) {
     if (!user) return false;
 
@@ -692,36 +795,44 @@ if (currentUser && data) {
     }
 
     setMessage("");
-    await loadCards();
+    await loadCards(user, { showLoading: false });
     setVariantBusy("");
     return true;
   }
 
-  async function toggleVariant(variant) {
+  async function addCopy(variant) {
     if (!user) return;
 
     const ownedSourceId = ownershipMap.get(variant.card_id);
-    setVariantBusy(variant.card_id);
-
     if (ownedSourceId) {
-      const { error } = await supabase
-        .from("collections")
-        .delete()
-        .eq("user_id", user.id)
-        .eq("card_id", ownedSourceId);
-
-      if (error) {
-        setMessage(`Non riesco a rimuovere ${variant.name}.`);
-      } else {
-        setMessage("");
-        await loadCards();
-      }
-
-      setVariantBusy("");
+      await incrementDupe(variant);
       return;
     }
 
     await addVariant(variant);
+  }
+
+  async function removeVariant(variant) {
+    if (!user || variantBusy) return;
+
+    const ownedSourceId = ownershipMap.get(variant.card_id);
+    if (!ownedSourceId) return;
+
+    setVariantBusy(variant.card_id);
+    const { error } = await supabase
+      .from("collections")
+      .delete()
+      .eq("user_id", user.id)
+      .eq("card_id", ownedSourceId);
+
+    if (error) {
+      setMessage(`Non riesco a rimuovere ${variant.name}.`);
+    } else {
+      setMessage("");
+      await loadCards(user, { showLoading: false });
+    }
+
+    setVariantBusy("");
   }
 
   async function addAllByRarity(rarity) {
@@ -754,7 +865,7 @@ if (currentUser && data) {
       setMessage(`Non riesco ad aggiungere le carte ${rarity}.`);
     } else {
       setMessage(`Aggiunte ${missingCards.length} carte ${rarity}.`);
-      await loadCards();
+      await loadCards(user, { showLoading: false });
     }
 
     setBulkBusy("");
@@ -784,7 +895,7 @@ if (currentUser && data) {
       setMessage(`Non riesco a eliminare le carte ${rarity}.`);
     } else {
       setMessage(`Eliminate ${idsToDelete.length} carte ${rarity}.`);
-      await loadCards();
+      await loadCards(user, { showLoading: false });
     }
 
     setBulkDeleteBusy("");
@@ -847,7 +958,7 @@ if (currentUser && data) {
           filter: `user_id=eq.${user.id}`,
         },
         () => {
-          loadCards(user);
+          loadCards(user, { showLoading: false });
         }
       )
       .subscribe();
@@ -911,15 +1022,32 @@ if (currentUser && data) {
 
       {/* TAB NAVIGATION */}
       <div style={tabNavStyle}>
-        {["collection","friends","progress"].map(tab => (
+        {["collection", "duplicates", "friends", "progress"].map(tab => (
           <button key={tab} type="button"
             onClick={() => setActiveTab(tab)}
             style={{ ...tabBtnStyle, ...(activeTab === tab ? tabBtnActiveStyle : {}) }}
           >
-            {tab === "collection" ? `🃏 ${t.collection}` : tab === "friends" ? `🤝 ${t.friends}` : `📈 ${t.progress}`}
+            {tab === "collection"
+              ? t.collection
+              : tab === "duplicates"
+                ? t.duplicates
+                : tab === "friends"
+                  ? t.friends
+                  : t.progress}
           </button>
         ))}
       </div>
+
+      {activeTab === "duplicates" && (
+        <DuplicatesPanel
+          duplicateCards={duplicateCards}
+          totalDupes={totalDupes}
+          variantBusy={variantBusy}
+          onIncrementDupe={incrementDupe}
+          onDecrementDupe={decrementDupe}
+          isMobile={isMobile}
+        />
+      )}
 
       {activeTab === "friends" && (
         <FriendsPanel
@@ -932,21 +1060,39 @@ if (currentUser && data) {
           friendSearchResult={friendSearchResult}
           friendSearchBusy={friendSearchBusy}
           friendSearchMsg={friendSearchMsg}
-          onSearch={searchFriendByEmail}
+          onSearch={searchFriendByNickname}
           onSendRequest={sendFriendRequest}
           onRespond={respondToRequest}
           onRemove={removeFriend}
           onViewFriend={loadFriendStats}
           viewingFriend={viewingFriend}
           friendStats={friendStats}
-          onBackToMine={() => { setViewingFriend(null); setFriendStats(null); }}
+          onBackToMine={() => {
+            setViewingFriend(null);
+            setFriendStats(null);
+            setFriendMessages([]);
+            setFriendMessageStatus("");
+          }}
           collectionCards={collectionCards}
-          dupesMap={dupesMap}
+          ownershipMap={ownershipMap}
+          friendMessages={friendMessages}
+          friendMessagesBusy={friendMessagesBusy}
+          friendMessageSending={friendMessageSending}
+          friendMessageStatus={friendMessageStatus}
+          onSendMessage={sendFriendMessage}
+          onRefreshMessages={loadFriendMessages}
+          cardCatalog={cardCatalog}
         />
       )}
 
       {activeTab === "progress" && (
-        <ProgressPanel t={t} snapshots={snapshots} onExportCSV={exportCSV} collectionCards={collectionCards} dupesMap={dupesMap} totalDupes={totalDupes} />
+        <ProgressPanel
+          t={t}
+          snapshots={snapshots}
+          onExportCSV={exportCSV}
+          ownedCount={ownedCatalogVariantCount}
+          totalCount={TOTAL_CARD_VARIANTS}
+        />
       )}
 
       {activeTab === "collection" && <>
@@ -1135,9 +1281,9 @@ if (currentUser && data) {
             groups={filteredGroups}
             ownershipMap={ownershipMap}
             variantBusy={variantBusy}
-            onToggle={toggleVariant}
+            onAddCopy={addCopy}
+            onRemoveVariant={removeVariant}
             dupesMap={dupesMap}
-            onIncrementDupe={incrementDupe}
             onDecrementDupe={decrementDupe}
             t={t}
           />
@@ -1168,11 +1314,18 @@ if (currentUser && data) {
 
       {/* Bottom Bar Mobile Style Navigation */}
       {isMobile && (
-        <nav style={{ ...bottomNavigationStyle, gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
-          {["collection","friends","progress"].map(tab => (
+        <nav style={{ ...bottomNavigationStyle, gridTemplateColumns: "repeat(5, 1fr)" }}>
+          {["collection", "duplicates", "friends", "progress"].map(tab => (
             <button key={tab} type="button" style={{ ...bottomNavTabStyle, borderTop: activeTab === tab ? "2px solid var(--accent-green)" : "2px solid transparent" }} onClick={() => setActiveTab(tab)}>
-              <span style={{ fontSize: 18 }}>{tab === "collection" ? "🃏" : tab === "friends" ? "🤝" : "📈"}</span>
-              <span style={bottomNavLabelStyle}>{tab === "collection" ? t.collection : tab === "friends" ? t.friends : t.progress}</span>
+              <span style={bottomNavLabelStyle}>
+                {tab === "collection"
+                  ? t.collection
+                  : tab === "duplicates"
+                    ? t.duplicates
+                    : tab === "friends"
+                      ? t.friends
+                      : t.progress}
+              </span>
             </button>
           ))}
           <button type="button" style={bottomNavTabStyle} onClick={() => setIsSettingsOpen(true)}>
@@ -1236,12 +1389,20 @@ function AuthPanel({
         type="password"
         value={authPassword}
         onChange={(event) => setAuthPassword(event.target.value)}
-        placeholder="Password"
+        placeholder={isLogin ? "Password" : "Password sicura"}
         autoComplete={isLogin ? "current-password" : "off"}
-        minLength={6}
+        minLength={isLogin ? undefined : PASSWORD_MIN_LENGTH}
+        pattern={isLogin ? undefined : PASSWORD_PATTERN}
+        title={isLogin ? undefined : PASSWORD_REQUIREMENTS}
         required
         style={{ ...inputStyle, width: "100%" }}
       />
+
+      {!isLogin ? (
+        <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: -4 }}>
+          {PASSWORD_REQUIREMENTS}
+        </div>
+      ) : null}
 
       {authMessage ? <div style={messageStyle}>{authMessage}</div> : null}
 
@@ -1273,7 +1434,7 @@ function StatCard({ title, value, total, color }) {
   );
 }
 
-function SectionedCardGrid({ groups, ownershipMap, variantBusy, onToggle, dupesMap, onIncrementDupe, onDecrementDupe, t }) {
+function SectionedCardGrid({ groups, ownershipMap, variantBusy, onAddCopy, onRemoveVariant, dupesMap, onDecrementDupe, t }) {
   const [collapsed, setCollapsed] = useState({});
 
   // Raggruppa per sezione mantenendo l'ordine
@@ -1321,9 +1482,9 @@ function SectionedCardGrid({ groups, ownershipMap, variantBusy, onToggle, dupesM
                     group={group}
                     ownershipMap={ownershipMap}
                     variantBusy={variantBusy}
-                    onToggle={onToggle}
+                    onAddCopy={onAddCopy}
+                    onRemoveVariant={onRemoveVariant}
                     dupesMap={dupesMap}
-                    onIncrementDupe={onIncrementDupe}
                     onDecrementDupe={onDecrementDupe}
                     t={t}
                   />
@@ -1337,7 +1498,7 @@ function SectionedCardGrid({ groups, ownershipMap, variantBusy, onToggle, dupesM
   );
 }
 
-function CollectionCard({ group, ownershipMap, variantBusy, onToggle, dupesMap, onIncrementDupe, onDecrementDupe }) {
+function CollectionCard({ group, ownershipMap, variantBusy, onAddCopy, onRemoveVariant, dupesMap, onDecrementDupe }) {
   const activeVariant =
     group.variants.find((variant) => ownershipMap.has(variant.card_id)) ||
     group.variants[0];
@@ -1378,24 +1539,45 @@ function CollectionCard({ group, ownershipMap, variantBusy, onToggle, dupesMap, 
             const dupes = dupesMap?.get(variant.card_id) || 0;
 
             return (
-              <div key={variant.card_id} style={{ display: "grid", gap: 3 }}>
+              <div key={variant.card_id} style={variantControlStyle}>
                 <button
                   type="button"
-                  title={`${variant.rarity}${active ? " posseduta" : " mancante"}`}
-                  aria-label={`${group.name} ${variant.rarity}`}
-                  onClick={() => onToggle(variant)}
+                  title={active ? `${variant.rarity}: aggiungi una doppia` : `${variant.rarity}: aggiungi carta`}
+                  aria-label={active ? `${group.name} ${variant.rarity}, aggiungi doppia` : `${group.name} ${variant.rarity}, aggiungi`}
+                  onClick={() => onAddCopy(variant)}
                   disabled={busy}
                   style={getRarityPipStyle(rarity.color, active, busy)}
                 >
-                  <span style={getRarityDotStyle(rarity.color, active)} />
-                  <span>{rarity.short}</span>
+                  <span style={rarityCodeStyle}>
+                    <span style={getRarityDotStyle(rarity.color, active)} />
+                    <span>{rarity.short}</span>
+                  </span>
+                  <span style={variantActionStyle}>{active ? "+ Doppia" : "Aggiungi"}</span>
                 </button>
                 {active && (
-                  <div style={dupeRowStyle}>
-                    <button type="button" style={dupeSmallBtnStyle} onClick={() => onDecrementDupe(variant)} title="-1">−</button>
-                    <span style={dupeCountStyle}>{dupes > 0 ? `×${dupes}` : "0"}</span>
-                    <button type="button" style={dupeSmallBtnStyle} onClick={() => onIncrementDupe(variant)} title="+1">+</button>
-                  </div>
+                  <>
+                    <span style={dupeCountStyle}>Doppie: {dupes}</span>
+                    <div style={dupeRowStyle}>
+                      <button
+                        type="button"
+                        style={{ ...dupeSmallBtnStyle, opacity: dupes === 0 ? 0.45 : 1 }}
+                        onClick={() => onDecrementDupe(variant)}
+                        disabled={busy || dupes === 0}
+                        title="Rimuovi una doppia"
+                      >
+                        -1
+                      </button>
+                      <button
+                        type="button"
+                        style={removeVariantButtonStyle}
+                        onClick={() => onRemoveVariant(variant)}
+                        disabled={busy}
+                        title="Rimuovi la carta e le sue doppie"
+                      >
+                        Rimuovi
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
             );
@@ -1413,6 +1595,8 @@ function EmptyState({ text }) {
 // Componente dedicato per il Modale Impostazioni
 function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStats, isMobile, onClose, onUsernameSaved, lang, setLang, accessibilityMode, setAccessibilityMode, t, onExportCSV }) {
   const [newPassword, setNewPassword] = useState("");
+  const [passwordNonce, setPasswordNonce] = useState("");
+  const [needsPasswordNonce, setNeedsPasswordNonce] = useState(false);
   const [passwordMessage, setPasswordMessage] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
 
@@ -1420,6 +1604,10 @@ function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStat
   const [profileMessage, setProfileMessage] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileLoaded, setProfileLoaded] = useState(false);
+  const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deleteAccountBusy, setDeleteAccountBusy] = useState(false);
+  const [deleteAccountMessage, setDeleteAccountMessage] = useState("");
 
   // Carica il profilo esistente all'apertura
   useEffect(() => {
@@ -1437,20 +1625,48 @@ function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStat
 
   async function handleProfileSave(e) {
     e.preventDefault();
+    const cleanUsername = username.trim();
+    if (cleanUsername.length < 3) {
+      setProfileMessage("Errore: il nickname deve avere almeno 3 caratteri.");
+      return;
+    }
     setProfileBusy(true);
     setProfileMessage("");
 
     const { error } = await supabase
       .from("profiles")
-      .upsert({ id: user.id, username: username.trim(), updated_at: new Date().toISOString() }, { onConflict: "id" });
+      .update({ username: cleanUsername, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
 
-    if (error) {
+    if (error?.code === "23505") {
+      setProfileMessage("Errore: questo nickname e gia utilizzato.");
+    } else if (error) {
       setProfileMessage(`Errore: ${error.message}`);
     } else {
-      setProfileMessage("Profilo aggiornato!");
-      if (onUsernameSaved) onUsernameSaved(username.trim());
+      setUsername(cleanUsername);
+      setProfileMessage("Nickname aggiornato!");
+      if (onUsernameSaved) onUsernameSaved(cleanUsername);
     }
     setProfileBusy(false);
+  }
+
+  async function handleDeleteAccount() {
+    if (deleteConfirmation !== "ELIMINA") return;
+    setDeleteAccountBusy(true);
+    setDeleteAccountMessage("");
+
+    const { error } = await supabase.functions.invoke("delete-account", {
+      body: { confirm: true },
+    });
+
+    if (error) {
+      setDeleteAccountMessage("Errore: non e stato possibile eliminare l'account.");
+      setDeleteAccountBusy(false);
+      return;
+    }
+
+    await logout("local");
+    onClose();
   }
 
   async function handlePasswordChange(e) {
@@ -1458,13 +1674,27 @@ function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStat
     setPasswordBusy(true);
     setPasswordMessage("");
 
-    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    const passwordUpdate = { password: newPassword };
+    if (needsPasswordNonce) {
+      passwordUpdate.nonce = passwordNonce.trim();
+    }
+    const { error } = await supabase.auth.updateUser(passwordUpdate);
 
-    if (error) {
+    if (error?.code === "reauthentication_needed") {
+      const { error: reauthenticateError } = await supabase.auth.reauthenticate();
+      if (reauthenticateError) {
+        setPasswordMessage(`Errore: ${reauthenticateError.message}`);
+      } else {
+        setNeedsPasswordNonce(true);
+        setPasswordMessage("Controlla la tua email: inserisci il codice ricevuto per confermare il cambio password.");
+      }
+    } else if (error) {
       setPasswordMessage(`Errore: ${error.message}`);
     } else {
       setPasswordMessage("Password aggiornata correttamente.");
       setNewPassword("");
+      setPasswordNonce("");
+      setNeedsPasswordNonce(false);
     }
     setPasswordBusy(false);
   }
@@ -1508,14 +1738,19 @@ function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStat
               <form onSubmit={handleProfileSave} style={{ display: "grid", gap: 8, marginTop: 6 }}>
                 <input
                   type="text"
-                  placeholder="Nome utente (es. Lorenzo)"
+                  placeholder="Nickname univoco"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  minLength={3}
                   maxLength={32}
+                  required
                   style={{ ...inputStyle, padding: "10px 12px", minHeight: 44, fontSize: 15 }}
                 />
+                <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                  Gli amici useranno questo nickname per trovarti.
+                </div>
                 <button type="submit" disabled={profileBusy} style={inlineFormSubmitStyle}>
-                  {profileBusy ? "Salvataggio..." : "Salva nome utente"}
+                  {profileBusy ? "Salvataggio..." : "Salva nickname"}
                 </button>
                 {profileMessage && (
                   <div style={{
@@ -1567,17 +1802,35 @@ function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStat
           <div style={settingsSectionBoxStyle}>
             <h3 style={settingsSectionTitleStyle}>Sicurezza account</h3>
             <form onSubmit={handlePasswordChange} style={{ display: "grid", gap: 10, marginTop: 6 }}>
-              <input 
-                type="password" 
-                placeholder="Nuova password (min. 6 caratteri)" 
+              <input
+                type="password"
+                placeholder="Nuova password sicura"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                minLength={6}
+                autoComplete="new-password"
+                minLength={PASSWORD_MIN_LENGTH}
+                pattern={PASSWORD_PATTERN}
+                title={PASSWORD_REQUIREMENTS}
                 required
                 style={{ ...inputStyle, padding: "10px 12px", minHeight: 44, fontSize: 15 }}
               />
+              <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                {PASSWORD_REQUIREMENTS}
+              </div>
+              {needsPasswordNonce && (
+                <input
+                  type="text"
+                  placeholder="Codice ricevuto via email"
+                  value={passwordNonce}
+                  onChange={(e) => setPasswordNonce(e.target.value)}
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  required
+                  style={{ ...inputStyle, padding: "10px 12px", minHeight: 44, fontSize: 15 }}
+                />
+              )}
               <button type="submit" disabled={passwordBusy} style={inlineFormSubmitStyle}>
-                {passwordBusy ? "Aggiornamento..." : "Cambia password"}
+                {passwordBusy ? "Aggiornamento..." : needsPasswordNonce ? "Conferma cambio password" : "Cambia password"}
               </button>
               {passwordMessage && (
                 <div style={{ 
@@ -1624,6 +1877,42 @@ function SettingsModal({ user, logout, currentTheme, setCurrentTheme, rarityStat
           >
             {t.disconnect}
           </button>
+
+          <div style={{ ...settingsSectionBoxStyle, borderColor: "var(--danger-border)" }}>
+            <h3 style={{ ...settingsSectionTitleStyle, color: "var(--danger-text)" }}>Elimina account</h3>
+            {!deleteAccountOpen ? (
+              <button type="button" onClick={() => setDeleteAccountOpen(true)} style={{ ...bulkDeleteButtonStyle, width: "100%" }}>
+                Elimina il mio account
+              </button>
+            ) : (
+              <>
+                <div style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.45 }}>
+                  L'eliminazione e definitiva: saranno rimossi profilo, collezione, amicizie e messaggi.
+                </div>
+                <input
+                  type="text"
+                  value={deleteConfirmation}
+                  onChange={(event) => setDeleteConfirmation(event.target.value)}
+                  placeholder="Scrivi ELIMINA per confermare"
+                  autoComplete="off"
+                  style={{ ...inputStyle, padding: "10px 12px", minHeight: 44, fontSize: 15 }}
+                />
+                <button
+                  type="button"
+                  onClick={handleDeleteAccount}
+                  disabled={deleteAccountBusy || deleteConfirmation !== "ELIMINA"}
+                  style={{
+                    ...bulkDeleteButtonStyle,
+                    width: "100%",
+                    opacity: deleteAccountBusy || deleteConfirmation !== "ELIMINA" ? 0.5 : 1,
+                  }}
+                >
+                  {deleteAccountBusy ? "Eliminazione..." : "Elimina definitivamente"}
+                </button>
+                {deleteAccountMessage && <div style={{ ...messageStyle, color: "var(--danger-text)" }}>{deleteAccountMessage}</div>}
+              </>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -1721,6 +2010,100 @@ function deriveNameFromCardId(cardId, rarity) {
   return rawCardId;
 }
 
+function mapOwnedCardToCatalog(card, catalog) {
+  const rarity = normalizeRarity(card.rarity);
+  const fallbackName = deriveNameFromCardId(card.card_id, rarity);
+  const catalogCard =
+    catalog.find((entry) => entry.card_id === card.card_id) ||
+    catalog.find((entry) => entry.rarity === rarity && entry.name === fallbackName);
+
+  return {
+    ...card,
+    name: catalogCard?.name || fallbackName,
+    rarity,
+    catalogCardId: catalogCard?.card_id || card.card_id,
+    section: catalogCard?.section || inferSectionFromRarity(rarity),
+    sectionTitle: catalogCard?.sectionTitle || getSectionTitle(inferSectionFromRarity(rarity)),
+    group_id: catalogCard?.group_id || `${inferSectionFromRarity(rarity)}-${slugify(fallbackName)}`,
+    sort_order: catalogCard?.sort_order || 900000 + rarityIndex(rarity),
+  };
+}
+
+function buildDuplicateSections(cards) {
+  const sections = new Map();
+
+  for (const card of cards) {
+    const descriptor = duplicateSectionDescriptor(card);
+    if (!sections.has(descriptor.key)) {
+      sections.set(descriptor.key, { ...descriptor, groups: new Map(), dupes: 0 });
+    }
+
+    const section = sections.get(descriptor.key);
+    const groupKey = card.group_id || `${card.section}-${card.name}`;
+    if (!section.groups.has(groupKey)) {
+      section.groups.set(groupKey, {
+        id: groupKey,
+        name: card.name,
+        sort_order: card.sort_order,
+        variants: [],
+        dupes: 0,
+      });
+    }
+
+    const group = section.groups.get(groupKey);
+    group.variants.push(card);
+    group.dupes += card.dupes || 0;
+    section.dupes += card.dupes || 0;
+  }
+
+  return Array.from(sections.values())
+    .map((section) => ({
+      ...section,
+      groups: Array.from(section.groups.values())
+        .map((group) => ({
+          ...group,
+          variants: group.variants.sort(
+            (first, second) => rarityIndex(first.rarity) - rarityIndex(second.rarity)
+          ),
+        }))
+        .sort(
+          (first, second) =>
+            first.sort_order - second.sort_order || first.name.localeCompare(second.name)
+        ),
+    }))
+    .sort((first, second) => first.order - second.order);
+}
+
+function duplicateSectionDescriptor(card) {
+  if (card.section === "main") {
+    return { key: "main", title: "Collezione base", order: 0 };
+  }
+  if (card.section === "time-shifted") {
+    return { key: "time-shifted", title: "Time Shifted", order: 1 };
+  }
+  if (card.section === "special") {
+    return { key: `special-${slugify(card.rarity)}`, title: `Special Card - ${card.rarity}`, order: 2 + rarityIndex(card.rarity) };
+  }
+  if (card.section === "pre-order") {
+    return { key: `pre-order-${slugify(card.rarity)}`, title: `Pre Order - ${card.rarity}`, order: 20 + rarityIndex(card.rarity) };
+  }
+  return { key: "custom", title: card.sectionTitle || "Carte manuali", order: 99 };
+}
+
+function quickMessageText(message, catalog) {
+  if (message.message_code === "need_card") {
+    const cardName =
+      catalog.find((card) => card.card_id === message.card_id)?.name ||
+      deriveNameFromCardId(message.card_id, "");
+    return `Mi serve ${cardName}. Possiamo scambiarla?`;
+  }
+
+  return (
+    QUICK_MESSAGE_TEMPLATES.find((template) => template.code === message.message_code)?.text ||
+    "Messaggio rapido"
+  );
+}
+
 function sanitizeManualName(name) {
   return String(name || "Carta manuale").replace(/::/g, " ").trim() || "Carta manuale";
 }
@@ -1791,18 +2174,21 @@ function slugify(value) {
 
 function getRarityPipStyle(color, active, busy) {
   return {
-    minHeight: 34,
+    width: "100%",
+    minHeight: 58,
     borderRadius: 8,
     border: active ? `2px solid ${color}` : "1px solid var(--border-strong)",
     background: active ? color : "var(--surface-2)",
     color: active ? "#080a0f" : "var(--text-primary)",
     cursor: busy ? "wait" : "pointer",
-    display: "inline-flex",
+    display: "flex",
+    flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    gap: 7,
+    gap: 3,
     fontWeight: 900,
     fontSize: 12,
+    padding: "6px 4px",
     opacity: busy ? 0.6 : 1,
     transition: "background 0.18s ease, border-color 0.18s ease, opacity 0.18s ease",
   };
@@ -1863,10 +2249,19 @@ function ConfettiOverlay() {
 // ============================================================
 function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, setFriendSearchEmail,
   friendSearchResult, friendSearchBusy, friendSearchMsg, onSearch, onSendRequest, onRespond,
-  onRemove, onViewFriend, viewingFriend, friendStats, onBackToMine, collectionCards, dupesMap }) {
+  onRemove, onViewFriend, viewingFriend, friendStats, onBackToMine, collectionCards,
+  ownershipMap, friendMessages, friendMessagesBusy, friendMessageSending, friendMessageStatus,
+  onSendMessage, onRefreshMessages, cardCatalog }) {
+  const [tradeListOpen, setTradeListOpen] = useState(false);
+  const myTradeSections = buildDuplicateSections(
+    collectionCards.filter((card) => (card.dupes || 0) > 0)
+  );
 
   if (viewingFriend && friendStats) {
-    const tradeCards = (friendStats.cards || []).filter(c => (c.dupes || 0) > 0);
+    const usefulTrades = (friendStats.cards || []).filter(
+      (card) => (card.dupes || 0) > 0 && !ownershipMap.has(card.catalogCardId)
+    );
+    const usefulTradeSections = buildDuplicateSections(usefulTrades);
     return (
       <div style={{ display: "grid", gap: 16 }}>
         <button type="button" onClick={onBackToMine} style={{ ...inlineSettingButtonStyle, width: "auto", display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -1895,53 +2290,38 @@ function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, set
         </div>
 
         <div style={trackingPanelStyle}>
-          <h3 style={sectionTitleStyle}>{t.tradeList}</h3>
-          <p style={sectionTextStyle}>{t.tradeDesc}</p>
-          {tradeCards.length === 0 ? (
-            <div style={emptyStyle}>{t.noTrades}</div>
+          <h3 style={sectionTitleStyle}>Doppie che ti mancano</h3>
+          <p style={sectionTextStyle}>Carte che {friendStats.username} ha in copia extra e che non risultano nella tua collezione.</p>
+          {usefulTrades.length === 0 ? (
+            <div style={emptyStyle}>Nessun doppione utile per completare la tua collezione.</div>
           ) : (
-            <div style={{ display: "grid", gap: 8 }}>
-              {tradeCards.map(c => {
-                const meta = getRarityMeta(c.rarity);
-                return (
-                  <div key={c.card_id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: "var(--surface-2)", borderRadius: 8, border: "1px solid var(--border)" }}>
-                    <span style={{ color: "var(--text-primary)", fontWeight: 700 }}>{c.card_id.replace(/-/g," ")}</span>
-                    <span style={{ color: meta.color, fontWeight: 900, fontSize: 13 }}>{meta.label} ×{c.dupes}</span>
-                  </div>
-                );
-              })}
-            </div>
+            <TradeOfferSections
+              sections={usefulTradeSections}
+              friendId={viewingFriend}
+              sending={friendMessageSending}
+              onRequest={onSendMessage}
+            />
           )}
         </div>
+
+        <FriendQuickChat
+          friendId={viewingFriend}
+          friendName={friendStats.username}
+          userId={user.id}
+          messages={friendMessages}
+          loading={friendMessagesBusy}
+          sending={friendMessageSending}
+          status={friendMessageStatus}
+          cardCatalog={cardCatalog}
+          onSend={onSendMessage}
+          onRefresh={onRefreshMessages}
+        />
       </div>
     );
   }
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      {/* La mia lista scambio */}
-      <div style={trackingPanelStyle}>
-        <h3 style={sectionTitleStyle}>{t.tradeList}</h3>
-        <p style={sectionTextStyle}>{t.tradeDesc}</p>
-        {(() => {
-          const myTrades = collectionCards.filter(c => (dupesMap.get(c.card_id) || 0) > 0);
-          if (myTrades.length === 0) return <div style={emptyStyle}>{t.noTrades}</div>;
-          return (
-            <div style={{ display: "grid", gap: 6 }}>
-              {myTrades.map(c => {
-                const meta = getRarityMeta(c.rarity);
-                return (
-                  <div key={c.card_id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: "var(--surface-2)", borderRadius: 8, border: "1px solid var(--border)" }}>
-                    <span style={{ color: "var(--text-primary)", fontWeight: 700 }}>{c.name} — {c.rarity}</span>
-                    <span style={{ color: meta.color, fontWeight: 900, fontSize: 13 }}>×{dupesMap.get(c.card_id)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })()}
-      </div>
-
       {/* Cerca amico */}
       <div style={trackingPanelStyle}>
         <h3 style={sectionTitleStyle}>{t.friendsTitle}</h3>
@@ -2020,6 +2400,275 @@ function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, set
           </div>
         )}
       </div>
+
+      <section style={trackingPanelStyle}>
+        <button
+          type="button"
+          style={collapsibleHeaderStyle}
+          onClick={() => setTradeListOpen((open) => !open)}
+        >
+          <span>
+            <strong style={{ color: "var(--text-heading)" }}>{t.tradeList}</strong>
+            <span style={collapsedSummaryStyle}>
+              {myTradeSections.reduce((total, section) => total + section.dupes, 0)} doppioni disponibili
+            </span>
+          </span>
+          <span style={expandIndicatorStyle}>{tradeListOpen ? "−" : "+"}</span>
+        </button>
+        {tradeListOpen && (
+          <div style={collapsedBodyStyle}>
+            {myTradeSections.length === 0 ? (
+              <div style={duplicateEmptyStyle}>{t.noTrades}</div>
+            ) : (
+              <ReadOnlyTradeSections sections={myTradeSections} />
+            )}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function normalizeNickname(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function ReadOnlyTradeSections({ sections }) {
+  return (
+    <div style={duplicateSectionListStyle}>
+      {sections.map((section) => (
+        <div key={section.key} style={duplicateSectionStyle}>
+          <div style={duplicateSectionHeaderStyle}>
+            <span style={duplicateSectionTitleStyle}>{section.title}</span>
+            <span style={duplicateSectionCountStyle}>{section.dupes} doppioni</span>
+          </div>
+          <div style={duplicateListStyle}>
+            {section.groups.map((group) => (
+              <div key={group.id} style={tradeRowStyle}>
+                <span style={duplicateNameStyle}>{group.name}</span>
+                <div style={variantBadgeListStyle}>
+                  {group.variants.map((variant) => {
+                    const meta = getRarityMeta(variant.rarity);
+                    return (
+                      <span key={variant.card_id} style={{ ...variantDupeBadgeStyle, borderColor: `${meta.color}66`, color: meta.color }}>
+                        {meta.label}: {variant.dupes}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TradeOfferSections({ sections, friendId, sending, onRequest }) {
+  return (
+    <div style={duplicateSectionListStyle}>
+      {sections.map((section) => (
+        <div key={section.key} style={duplicateSectionStyle}>
+          <div style={duplicateSectionHeaderStyle}>
+            <span style={duplicateSectionTitleStyle}>{section.title}</span>
+            <span style={duplicateSectionCountStyle}>{section.dupes} doppioni utili</span>
+          </div>
+          {section.groups.map((group) => (
+            <div key={group.id} style={tradeOfferGroupStyle}>
+              <span style={duplicateNameStyle}>{group.name}</span>
+              {group.variants.map((variant) => {
+                const meta = getRarityMeta(variant.rarity);
+                const pendingKey = `need_card:${variant.card_id}`;
+                return (
+                  <div key={variant.card_id} style={tradeVariantOfferStyle}>
+                    <span style={{ ...variantDupeBadgeStyle, borderColor: `${meta.color}66`, color: meta.color }}>
+                      {meta.label}: {variant.dupes} doppie
+                    </span>
+                    <button
+                      type="button"
+                      style={duplicateAddButtonStyle}
+                      onClick={() => onRequest(friendId, "need_card", variant.card_id)}
+                      disabled={sending === pendingKey}
+                    >
+                      {sending === pendingKey ? "Invio..." : "Mi serve questa"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FriendQuickChat({ friendId, friendName, userId, messages, loading, sending, status, cardCatalog, onSend, onRefresh }) {
+  return (
+    <section style={trackingPanelStyle}>
+      <div style={chatHeaderStyle}>
+        <div>
+          <h3 style={sectionTitleStyle}>Messaggi rapidi</h3>
+          <p style={sectionTextStyle}>Chat con {friendName}: scegli un messaggio preimpostato.</p>
+        </div>
+        <button type="button" onClick={() => onRefresh(friendId)} style={{ ...inlineSettingButtonStyle, width: "auto", marginTop: 0 }}>
+          Aggiorna
+        </button>
+      </div>
+
+      <div style={quickMessageButtonsStyle}>
+        {QUICK_MESSAGE_TEMPLATES.map((template) => {
+          const pendingKey = `${template.code}:`;
+          return (
+            <button
+              key={template.code}
+              type="button"
+              style={quickMessageButtonStyle}
+              onClick={() => onSend(friendId, template.code)}
+              disabled={sending === pendingKey}
+            >
+              {sending === pendingKey ? "Invio..." : template.text}
+            </button>
+          );
+        })}
+      </div>
+
+      {status && <div style={messageStyle}>{status}</div>}
+
+      <div style={chatThreadStyle}>
+        {loading ? (
+          <div style={duplicateEmptyStyle}>Caricamento messaggi...</div>
+        ) : messages.length === 0 ? (
+          <div style={duplicateEmptyStyle}>Nessun messaggio ancora.</div>
+        ) : (
+          messages.map((message) => {
+            const mine = message.sender_id === userId;
+            return (
+              <div
+                key={message.id}
+                style={{
+                  ...chatBubbleStyle,
+                  ...(mine ? myChatBubbleStyle : friendChatBubbleStyle),
+                }}
+              >
+                <span style={chatAuthorStyle}>{mine ? "Tu" : friendName}</span>
+                <span>{quickMessageText(message, cardCatalog)}</span>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ============================================================
+// DUPLICATES PANEL
+// ============================================================
+function DuplicatesPanel({ duplicateCards, totalDupes, variantBusy, onIncrementDupe, onDecrementDupe, isMobile }) {
+  const sections = buildDuplicateSections(duplicateCards);
+  const uniqueRepeatedCards = sections.reduce((total, section) => total + section.groups.length, 0);
+
+  return (
+    <div style={duplicatesLayoutStyle}>
+      <section style={trackingPanelStyle}>
+        <div style={duplicatesHeaderStyle}>
+          <div>
+            <h2 style={sectionTitleStyle}>Doppioni</h2>
+            <p style={sectionTextStyle}>Copie extra disponibili nella tua collezione.</p>
+          </div>
+          <div style={duplicatesTotalStyle}>
+            <span style={duplicatesTotalLabelStyle}>Totale doppioni</span>
+            <span style={duplicatesTotalNumberStyle}>{totalDupes}</span>
+          </div>
+        </div>
+
+        <div style={duplicateStatsGridStyle}>
+          {sections.length === 0 ? (
+            <div style={emptyStyle}>Nessun doppione presente.</div>
+          ) : (
+            sections.map((section) => (
+              <div key={section.key} style={statCardStyle}>
+                <div style={statLabelStyle}>{section.title}</div>
+                <div style={{ ...statValueStyle, color: "var(--accent-gold)", fontSize: 25 }}>{section.dupes}</div>
+                <div style={statTotalStyle}>{section.groups.length} carte ripetute</div>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section style={trackingPanelStyle}>
+        <div style={cardBrowserHeaderStyle}>
+          <h2 style={sectionTitleStyle}>Carte doppie</h2>
+          <span style={gridCountStyle}>{uniqueRepeatedCards} carte</span>
+        </div>
+
+        {duplicateCards.length === 0 ? (
+          <div style={duplicateEmptyStyle}>Non hai ancora copie extra.</div>
+        ) : (
+          <div style={duplicateSectionListStyle}>
+            {sections.map((section) => (
+              <div key={section.key} style={duplicateSectionStyle}>
+                <div style={duplicateSectionHeaderStyle}>
+                  <span style={duplicateSectionTitleStyle}>{section.title}</span>
+                  <span style={duplicateSectionCountStyle}>{section.dupes} doppioni</span>
+                </div>
+                <div style={duplicateListStyle}>
+                  {section.groups.map((group) => (
+                    <article
+                      key={group.id}
+                      style={{
+                        ...duplicateGroupedItemStyle,
+                        ...(isMobile ? duplicateGroupedItemMobileStyle : {}),
+                      }}
+                    >
+                      <div style={duplicateInfoStyle}>
+                        <span style={duplicateNameStyle}>{group.name}</span>
+                        <span style={duplicateOwnedStyle}>Doppioni totali: {group.dupes}</span>
+                      </div>
+                      <div style={duplicateVariantListStyle}>
+                        {group.variants.map((variant) => {
+                          const rarity = getRarityMeta(variant.rarity);
+                          const busy = variantBusy === variant.card_id;
+                          return (
+                            <div key={variant.card_id} style={duplicateVariantRowStyle}>
+                              <span style={{ ...variantDupeBadgeStyle, borderColor: `${rarity.color}66`, color: rarity.color }}>
+                                {rarity.label}: {variant.dupes}
+                              </span>
+                              <div style={duplicateButtonsStyle}>
+                                <button
+                                  type="button"
+                                  style={duplicateAdjustButtonStyle}
+                                  onClick={() => onDecrementDupe(variant)}
+                                  disabled={busy}
+                                  aria-label={`Rimuovi una doppia ${variant.rarity} di ${group.name}`}
+                                >
+                                  -1
+                                </button>
+                                <button
+                                  type="button"
+                                  style={duplicateAddButtonStyle}
+                                  onClick={() => onIncrementDupe(variant)}
+                                  disabled={busy}
+                                  aria-label={`Aggiungi una doppia ${variant.rarity} di ${group.name}`}
+                                >
+                                  + Doppia
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -2027,15 +2676,20 @@ function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, set
 // ============================================================
 // PROGRESS PANEL
 // ============================================================
-function ProgressPanel({ t, snapshots, onExportCSV, collectionCards, dupesMap, totalDupes }) {
-  const maxOwned = snapshots.length > 0 ? Math.max(...snapshots.map(s => s.owned_count), 1) : 1;
-  const chartW = 600, chartH = 180, padL = 40, padB = 30, padR = 16, padT = 16;
+function ProgressPanel({ t, snapshots, onExportCSV, ownedCount, totalCount }) {
+  const chartW = 700, chartH = 210, padL = 48, padB = 30, padR = 16, padT = 18;
   const innerW = chartW - padL - padR;
   const innerH = chartH - padT - padB;
+  const chartTotal = Math.max(totalCount, 1);
+  const completion = Math.round((ownedCount / chartTotal) * 100);
+  const remaining = Math.max(totalCount - ownedCount, 0);
+  const firstOwned = snapshots[0]?.owned_count ?? ownedCount;
+  const lastOwned = snapshots[snapshots.length - 1]?.owned_count ?? ownedCount;
+  const gained = Math.max(lastOwned - firstOwned, 0);
 
   const points = snapshots.map((s, i) => {
     const x = padL + (snapshots.length > 1 ? (i / (snapshots.length - 1)) * innerW : innerW / 2);
-    const y = padT + innerH - (s.owned_count / maxOwned) * innerH;
+    const y = padT + innerH - (s.owned_count / chartTotal) * innerH;
     return { x, y, ...s };
   });
 
@@ -2045,24 +2699,43 @@ function ProgressPanel({ t, snapshots, onExportCSV, collectionCards, dupesMap, t
     : "";
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
-      <div style={trackingPanelStyle}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+    <div style={duplicatesLayoutStyle}>
+      <section style={trackingPanelStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <div>
             <h3 style={sectionTitleStyle}>{t.progressTitle}</h3>
-            <p style={sectionTextStyle}>{t.progressDesc}</p>
+            <p style={sectionTextStyle}>Avanzamento delle varianti possedute nel tempo.</p>
           </div>
           <button type="button" onClick={onExportCSV} style={inlineFormSubmitStyle}>💾 {t.exportCSV}</button>
         </div>
 
-        <div style={{ overflowX: "auto" }}>
+        <div style={progressSummaryGridStyle}>
+          <div style={progressMetricStyle}>
+            <span style={progressMetricLabelStyle}>Completamento</span>
+            <span style={progressMetricValueStyle}>{completion}%</span>
+          </div>
+          <div style={progressMetricStyle}>
+            <span style={progressMetricLabelStyle}>Varianti possedute</span>
+            <span style={progressMetricValueStyle}>{ownedCount}</span>
+          </div>
+          <div style={progressMetricStyle}>
+            <span style={progressMetricLabelStyle}>Mancanti</span>
+            <span style={progressMetricValueStyle}>{remaining}</span>
+          </div>
+          <div style={progressMetricStyle}>
+            <span style={progressMetricLabelStyle}>Guadagnate nello storico</span>
+            <span style={progressMetricValueStyle}>+{gained}</span>
+          </div>
+        </div>
+
+        <div style={progressChartStyle}>
           <svg viewBox={`0 0 ${chartW} ${chartH}`} style={{ width: "100%", minWidth: 280, display: "block" }}>
             {/* grid lines */}
             {[0,0.25,0.5,0.75,1].map(v => {
               const y = padT + innerH - v * innerH;
               return <g key={v}>
                 <line x1={padL} y1={y} x2={chartW - padR} y2={y} stroke="var(--border)" strokeWidth={1} />
-                <text x={padL - 6} y={y + 4} textAnchor="end" fontSize={10} fill="var(--text-muted)">{Math.round(v * maxOwned)}</text>
+                <text x={padL - 6} y={y + 4} textAnchor="end" fontSize={10} fill="var(--text-muted)">{Math.round(v * 100)}%</text>
               </g>;
             })}
             {/* area fill */}
@@ -2084,28 +2757,9 @@ function ProgressPanel({ t, snapshots, onExportCSV, collectionCards, dupesMap, t
           </svg>
         </div>
 
-        {snapshots.length === 0 && <div style={emptyStyle}>Nessun dato ancora. Torna domani per vedere la progressione!</div>}
-      </div>
+        {snapshots.length < 2 && <div style={duplicateEmptyStyle}>La progressione apparira dopo piu rilevazioni giornaliere.</div>}
+      </section>
 
-      {/* Riepilogo doppioni per rarità */}
-      <div style={trackingPanelStyle}>
-        <h3 style={sectionTitleStyle}>{t.dupesLabel} — riepilogo</h3>
-        <div style={{ ...statsGridStyle, marginBottom: 0 }}>
-          {RARITY_DEFINITIONS.map(r => {
-            const count = collectionCards.filter(c => c.rarity === r.label).reduce((a, c) => a + (dupesMap.get(c.card_id) || 0), 0);
-            return (
-              <div key={r.label} style={{ ...statCardStyle, borderColor: `${r.color}55` }}>
-                <div style={statLabelStyle}>{r.label}</div>
-                <div style={{ ...statValueStyle, color: r.color, fontSize: 22 }}>{count}</div>
-                <div style={statTotalStyle}>{t.dupesLabel}</div>
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ textAlign: "center", marginTop: 8, color: "var(--text-secondary)", fontWeight: 700 }}>
-          Totale doppioni: <span style={{ color: "var(--accent-gold)", fontWeight: 900 }}>{totalDupes}</span>
-        </div>
-      </div>
     </div>
   );
 }
@@ -2293,6 +2947,42 @@ const trackingPanelStyle = {
   display: "grid",
   gap: 16,
   boxShadow: "var(--card-shadow)",
+};
+
+const progressSummaryGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 150px),1fr))",
+  gap: 10,
+};
+
+const progressMetricStyle = {
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  padding: "12px 13px",
+  display: "grid",
+  gap: 6,
+};
+
+const progressMetricLabelStyle = {
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
+const progressMetricValueStyle = {
+  color: "var(--text-heading)",
+  fontSize: 26,
+  lineHeight: 1,
+  fontWeight: 900,
+};
+
+const progressChartStyle = {
+  overflowX: "auto",
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  padding: "12px 8px 5px",
 };
 
 const trackingGridStyle = {
@@ -2581,8 +3271,8 @@ const cardCountPillStyle = {
 
 const rarityPipGridStyle = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit,minmax(48px,1fr))",
-  gap: 5,
+  gridTemplateColumns: "repeat(auto-fit,minmax(86px,1fr))",
+  gap: 8,
 };
 
 const sectionFolderHeaderStyle = {
@@ -2836,16 +3526,34 @@ const tabBtnActiveStyle = {
 };
 
 // Dupe counter styles inside CollectionCard
-const dupeRowStyle = {
-  display: "flex",
+const variantControlStyle = {
+  display: "grid",
+  alignContent: "start",
+  gap: 5,
+  minWidth: 0,
+};
+
+const rarityCodeStyle = {
+  display: "inline-flex",
   alignItems: "center",
-  justifyContent: "center",
+  gap: 6,
+};
+
+const variantActionStyle = {
+  fontSize: 11,
+  fontWeight: 800,
+};
+
+const dupeRowStyle = {
+  display: "grid",
+  gridTemplateColumns: "32px minmax(0, 1fr)",
+  alignItems: "center",
   gap: 4,
 };
 
 const dupeSmallBtnStyle = {
-  width: 20,
-  height: 20,
+  width: 32,
+  height: 28,
   borderRadius: 4,
   border: "1px solid var(--border-strong)",
   background: "var(--surface-1)",
@@ -2861,9 +3569,330 @@ const dupeSmallBtnStyle = {
 };
 
 const dupeCountStyle = {
-  fontSize: 11,
+  fontSize: 12,
   fontWeight: 900,
   color: "var(--accent-gold)",
-  minWidth: 18,
   textAlign: "center",
+};
+
+const removeVariantButtonStyle = {
+  minHeight: 28,
+  borderRadius: 4,
+  border: "1px solid var(--danger-border)",
+  background: "var(--danger-bg)",
+  color: "var(--danger-text)",
+  fontSize: 11,
+  fontWeight: 800,
+  cursor: "pointer",
+  padding: "3px 5px",
+};
+
+const duplicatesLayoutStyle = {
+  display: "grid",
+  gap: 16,
+};
+
+const duplicatesHeaderStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 16,
+  flexWrap: "wrap",
+};
+
+const duplicatesTotalStyle = {
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  padding: "10px 14px",
+  display: "grid",
+  gap: 4,
+  minWidth: 132,
+};
+
+const duplicatesTotalLabelStyle = {
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
+const duplicatesTotalNumberStyle = {
+  color: "var(--accent-gold)",
+  fontSize: 30,
+  lineHeight: 1,
+  fontWeight: 900,
+};
+
+const duplicateStatsGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 128px),1fr))",
+  gap: 10,
+};
+
+const duplicateEmptyStyle = {
+  background: "var(--surface-2)",
+  border: "1px dashed var(--border-strong)",
+  borderRadius: 10,
+  padding: 22,
+  textAlign: "center",
+  color: "var(--text-secondary)",
+};
+
+const duplicateListStyle = {
+  display: "grid",
+  gap: 8,
+};
+
+const duplicateSectionListStyle = {
+  display: "grid",
+  gap: 16,
+};
+
+const duplicateSectionStyle = {
+  display: "grid",
+  gap: 9,
+};
+
+const duplicateSectionHeaderStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+  paddingBottom: 8,
+  borderBottom: "1px solid var(--border)",
+};
+
+const duplicateSectionTitleStyle = {
+  color: "var(--text-heading)",
+  fontSize: 14,
+  fontWeight: 900,
+};
+
+const duplicateSectionCountStyle = {
+  color: "var(--accent-gold)",
+  fontSize: 12,
+  fontWeight: 800,
+  whiteSpace: "nowrap",
+};
+
+const duplicateGroupedItemStyle = {
+  display: "grid",
+  gridTemplateColumns: "minmax(140px, 1fr) minmax(240px, 2fr)",
+  alignItems: "start",
+  gap: 12,
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  padding: "10px 12px",
+};
+
+const duplicateGroupedItemMobileStyle = {
+  gridTemplateColumns: "1fr",
+  alignItems: "start",
+};
+
+const duplicateVariantListStyle = {
+  display: "grid",
+  gap: 8,
+};
+
+const duplicateVariantRowStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  flexWrap: "wrap",
+};
+
+const duplicateInfoStyle = {
+  display: "grid",
+  gap: 3,
+  minWidth: 0,
+};
+
+const duplicateNameStyle = {
+  color: "var(--text-heading)",
+  fontSize: 14,
+  fontWeight: 800,
+  overflowWrap: "anywhere",
+};
+
+const variantDupeBadgeStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  background: "var(--surface-1)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 7,
+  padding: "6px 8px",
+  color: "var(--text-primary)",
+  fontSize: 13,
+  fontWeight: 800,
+  whiteSpace: "nowrap",
+};
+
+const variantBadgeListStyle = {
+  display: "flex",
+  justifyContent: "flex-end",
+  flexWrap: "wrap",
+  gap: 6,
+};
+
+const duplicateOwnedStyle = {
+  color: "var(--text-muted)",
+  fontSize: 11,
+  whiteSpace: "nowrap",
+};
+
+const duplicateButtonsStyle = {
+  display: "flex",
+  gap: 6,
+};
+
+const duplicateAdjustButtonStyle = {
+  background: "var(--surface-1)",
+  border: "1px solid var(--border-strong)",
+  color: "var(--text-primary)",
+  borderRadius: 7,
+  minHeight: 38,
+  minWidth: 42,
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const duplicateAddButtonStyle = {
+  background: "var(--success-bg)",
+  border: "1px solid var(--success-border)",
+  color: "var(--success-text)",
+  borderRadius: 7,
+  minHeight: 38,
+  padding: "6px 12px",
+  fontWeight: 900,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+const collapsibleHeaderStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  border: "none",
+  background: "transparent",
+  color: "var(--text-heading)",
+  cursor: "pointer",
+  fontSize: 17,
+  textAlign: "left",
+  padding: 0,
+  width: "100%",
+};
+
+const collapsedSummaryStyle = {
+  marginLeft: "auto",
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
+const expandIndicatorStyle = {
+  width: 26,
+  height: 26,
+  borderRadius: 7,
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  color: "var(--text-heading)",
+  display: "grid",
+  placeItems: "center",
+  flexShrink: 0,
+};
+
+const collapsedBodyStyle = {
+  paddingTop: 4,
+};
+
+const tradeOfferGroupStyle = {
+  display: "grid",
+  gap: 8,
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  padding: "10px 12px",
+};
+
+const tradeVariantOfferStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const tradeRowStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 12,
+  padding: "10px 12px",
+  background: "var(--surface-2)",
+  borderRadius: 8,
+  border: "1px solid var(--border)",
+};
+
+const chatHeaderStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "start",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
+const quickMessageButtonsStyle = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const quickMessageButtonStyle = {
+  background: "var(--surface-2)",
+  border: "1px solid var(--border-strong)",
+  color: "var(--text-primary)",
+  padding: "9px 12px",
+  borderRadius: 8,
+  cursor: "pointer",
+  fontSize: 13,
+  fontWeight: 700,
+};
+
+const chatThreadStyle = {
+  display: "grid",
+  gap: 8,
+  paddingTop: 4,
+};
+
+const chatBubbleStyle = {
+  maxWidth: "min(80%, 540px)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  padding: "9px 12px",
+  display: "grid",
+  gap: 3,
+  color: "var(--text-primary)",
+  fontSize: 14,
+};
+
+const myChatBubbleStyle = {
+  justifySelf: "end",
+  background: "var(--success-bg)",
+  borderColor: "var(--success-border)",
+};
+
+const friendChatBubbleStyle = {
+  justifySelf: "start",
+  background: "var(--surface-2)",
+};
+
+const chatAuthorStyle = {
+  fontSize: 11,
+  fontWeight: 900,
+  color: "var(--text-secondary)",
 };

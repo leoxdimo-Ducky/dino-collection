@@ -11,7 +11,7 @@ set search_path = ''
 as $$
 begin
   insert into public.profiles (id, username, avatar_url)
-  values (new.id, split_part(new.email, '@', 1), '')
+  values (new.id, 'utente_' || substr(replace(new.id::text, '-', ''), 1, 8), '')
   on conflict (id) do nothing;
   return new;
 end;
