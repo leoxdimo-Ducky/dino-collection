@@ -79,6 +79,46 @@ create policy "Users can remove their friendships"
 create index if not exists friendships_addressee_id_idx
   on public.friendships (addressee_id);
 
+create index if not exists friendships_requester_id_idx
+  on public.friendships (requester_id);
+
+alter table public.friendships
+  drop constraint if exists friendships_requester_id_addressee_id_key;
+
+drop index if exists public.friendships_requester_id_addressee_id_key;
+
+create unique index if not exists friendships_one_active_pair_idx
+  on public.friendships (
+    least(requester_id, addressee_id),
+    greatest(requester_id, addressee_id)
+  )
+  where status in ('pending', 'accepted');
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'friendships'
+  ) then
+    alter publication supabase_realtime add table public.friendships;
+  end if;
+
+  if to_regclass('public.friend_messages') is not null
+    and not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'friend_messages'
+  ) then
+    alter publication supabase_realtime add table public.friend_messages;
+  end if;
+end
+$$;
+
 alter table public.collection_snapshots enable row level security;
 revoke all on table public.collection_snapshots from anon;
 revoke all on table public.collection_snapshots from authenticated;

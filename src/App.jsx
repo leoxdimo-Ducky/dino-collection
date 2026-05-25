@@ -105,8 +105,18 @@ const T = {
     duplicates: "Doppioni",
     friends: "Amici",
     notifications: "Notifiche",
+    friendRequestsLabel: "Richieste amicizia",
+    messages: "Messaggi",
+    usefulDupes: "Doppioni utili",
+    noNotifications: "Nessuna nuova notifica.",
+    noMessages: "Nessun nuovo messaggio.",
+    noUsefulDupes: "Nessun doppione utile segnalato.",
+    openFriend: "Apri amico",
+    messageReceived: "Nuovo messaggio",
+    usefulDupeAlert: "Ha una carta doppia che ti manca",
     progress: "Progressione",
     settings: "Impostazioni",
+    more: "Menu",
     loading: "Caricamento...",
     noCards: "Nessuna carta trovata.",
     addMissing: "Aggiungi mancanti",
@@ -133,6 +143,10 @@ const T = {
     pendingReply: "In attesa di risposta",
     refresh: "Aggiorna",
     friendshipLoadError: "Non riesco a caricare richieste e amicizie.",
+    alreadyFriends: "Siete gia amici.",
+    existingPendingRequest: "C'e gia una richiesta in attesa tra voi.",
+    friendshipRemoved: "Amicizia eliminata.",
+    requestDeclined: "Richiesta rifiutata.",
     yourFriends: "I tuoi amici",
     viewCollection: "Vedi collezione",
     backToMine: "← Torna alla mia collezione",
@@ -170,8 +184,18 @@ const T = {
     duplicates: "Duplicates",
     friends: "Friends",
     notifications: "Notifications",
+    friendRequestsLabel: "Friend requests",
+    messages: "Messages",
+    usefulDupes: "Useful duplicates",
+    noNotifications: "No new notifications.",
+    noMessages: "No new messages.",
+    noUsefulDupes: "No useful duplicates reported.",
+    openFriend: "Open friend",
+    messageReceived: "New message",
+    usefulDupeAlert: "Has a duplicate card you need",
     progress: "Progress",
     settings: "Settings",
+    more: "Menu",
     loading: "Loading...",
     noCards: "No cards found.",
     addMissing: "Add missing",
@@ -198,6 +222,10 @@ const T = {
     pendingReply: "Waiting for a response",
     refresh: "Refresh",
     friendshipLoadError: "I cannot load friend requests and friendships.",
+    alreadyFriends: "You are already friends.",
+    existingPendingRequest: "A request is already pending between you.",
+    friendshipRemoved: "Friend removed.",
+    requestDeclined: "Request declined.",
     yourFriends: "Your friends",
     viewCollection: "View collection",
     backToMine: "← Back to my collection",
@@ -260,6 +288,18 @@ export default function App() {
   const [friends, setFriends] = useState([]);
   const [friendRequests, setFriendRequests] = useState([]);
   const [sentFriendRequests, setSentFriendRequests] = useState([]);
+  const [receivedFriendMessages, setReceivedFriendMessages] = useState([]);
+  const [usefulDuplicateAlerts, setUsefulDuplicateAlerts] = useState([]);
+  const [socialNotificationsBusy, setSocialNotificationsBusy] = useState(false);
+  const [socialNotificationsMessage, setSocialNotificationsMessage] = useState("");
+  const [seenSocialNotificationIds, setSeenSocialNotificationIds] = useState(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      return JSON.parse(localStorage.getItem("rtc_seen_social_notifications") || "[]");
+    } catch {
+      return [];
+    }
+  });
   const [friendDataBusy, setFriendDataBusy] = useState(false);
   const [friendDataMessage, setFriendDataMessage] = useState("");
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
@@ -276,13 +316,17 @@ export default function App() {
   const [snapshots, setSnapshots] = useState([]);
   const [confettiActive, setConfettiActive] = useState(false);
   const prevOwnedRef = React.useRef({});
+  const friendsRef = React.useRef([]);
 
   const user = session?.user;
 
   // Monitoraggio della larghezza dello schermo per la responsività dei menù
   useEffect(() => {
     function handleResize() {
-      setIsMobile(window.innerWidth < 640);
+      setIsMobile(
+        window.innerWidth < 760 ||
+        (window.innerHeight < 520 && window.innerWidth < 1100)
+      );
     }
     handleResize();
     window.addEventListener("resize", handleResize);
@@ -392,10 +436,11 @@ export default function App() {
   // --- AMICIZIE ---
   const loadFriends = useCallback(async (currentUser, { showLoading = false } = {}) => {
     if (!currentUser) {
+      friendsRef.current = [];
       setFriends([]);
       setFriendRequests([]);
       setSentFriendRequests([]);
-      return;
+      return [];
     }
 
     if (showLoading) {
@@ -405,17 +450,18 @@ export default function App() {
 
     const { data: friendshipRows, error } = await supabase
       .from("friendships")
-      .select("id,requester_id,addressee_id,status")
+      .select("id,requester_id,addressee_id,status,created_at")
       .or(`requester_id.eq.${currentUser.id},addressee_id.eq.${currentUser.id}`)
       .in("status", ["accepted", "pending"]);
 
     if (error) {
+      friendsRef.current = [];
       setFriends([]);
       setFriendRequests([]);
       setSentFriendRequests([]);
       setFriendDataMessage(t.friendshipLoadError);
       setFriendDataBusy(false);
-      return;
+      return [];
     }
 
     const rows = friendshipRows || [];
@@ -456,15 +502,20 @@ export default function App() {
       }
     }
 
-    setFriends(
-      acceptedRows.map((friendship) => {
+    const acceptedFriends = acceptedRows.map((friendship) => {
         const friendId =
           friendship.requester_id === currentUser.id
             ? friendship.addressee_id
             : friendship.requester_id;
-        return { ...friendship, friendProfile: profilesById.get(friendId) || null };
-      })
-    );
+        return {
+          ...friendship,
+          friendId,
+          friendProfile: profilesById.get(friendId) || null,
+        };
+      });
+
+    friendsRef.current = acceptedFriends;
+    setFriends(acceptedFriends);
     setFriendRequests(
       incomingRequests.map((request) => ({
         ...request,
@@ -478,6 +529,7 @@ export default function App() {
       }))
     );
     setFriendDataBusy(false);
+    return acceptedFriends;
   }, [t.friendshipLoadError]);
 
   async function searchFriendByNickname() {
@@ -508,9 +560,55 @@ export default function App() {
   }
 
   async function sendFriendRequest(addresseeId) {
-    const { error } = await supabase.from("friendships").insert({ requester_id: user.id, addressee_id: addresseeId, status: "pending" });
+    if (!user || !addresseeId) return;
+
+    const knownRelationship = [...friends, ...friendRequests, ...sentFriendRequests].find(
+      (friendship) =>
+        [friendship.requester_id, friendship.addressee_id].includes(user.id) &&
+        [friendship.requester_id, friendship.addressee_id].includes(addresseeId)
+    );
+
+    if (knownRelationship?.status === "accepted") {
+      setFriendSearchMsg(t.alreadyFriends);
+      return;
+    }
+    if (knownRelationship?.status === "pending") {
+      setFriendSearchMsg(t.existingPendingRequest);
+      return;
+    }
+
+    const { data: existingRows, error: existingError } = await supabase
+      .from("friendships")
+      .select("id,status")
+      .or(
+        `and(requester_id.eq.${user.id},addressee_id.eq.${addresseeId}),and(requester_id.eq.${addresseeId},addressee_id.eq.${user.id})`
+      )
+      .in("status", ["accepted", "pending"])
+      .limit(1);
+
+    if (existingError) {
+      setFriendSearchMsg("Non riesco a verificare l'amicizia. Riprova tra poco.");
+      return;
+    }
+    if (existingRows?.[0]?.status === "accepted") {
+      setFriendSearchMsg(t.alreadyFriends);
+      await loadFriends(user);
+      return;
+    }
+    if (existingRows?.length > 0) {
+      setFriendSearchMsg(t.existingPendingRequest);
+      await loadFriends(user);
+      return;
+    }
+
+    const { error } = await supabase.from("friendships").insert({
+      requester_id: user.id,
+      addressee_id: addresseeId,
+      status: "pending",
+    });
     if (error?.code === "23505") {
-      setFriendSearchMsg("Richiesta già inviata o amicizia già presente.");
+      setFriendSearchMsg(t.existingPendingRequest);
+      await loadFriends(user);
     } else if (error) {
       setFriendSearchMsg("Non riesco a inviare la richiesta. Riprova tra poco.");
       setFriendDataMessage(t.friendshipLoadError);
@@ -532,6 +630,7 @@ export default function App() {
       return;
     }
     await loadFriends(user);
+    setFriendDataMessage(accept ? "Amicizia accettata." : t.requestDeclined);
   }
 
   async function removeFriend(id) {
@@ -541,6 +640,10 @@ export default function App() {
       return;
     }
     await loadFriends(user);
+    setViewingFriend(null);
+    setFriendStats(null);
+    setFriendMessages([]);
+    setFriendDataMessage(t.friendshipRemoved);
   }
 
   async function loadFriendStats(friendId) {
@@ -692,6 +795,157 @@ export default function App() {
 
     return map;
   }, [catalogByNameRarity, collectionCards]);
+
+  const loadSocialNotifications = useCallback(async (
+    currentUser,
+    acceptedFriends = friendsRef.current,
+    { showLoading = false } = {}
+  ) => {
+    if (!currentUser) {
+      setReceivedFriendMessages([]);
+      setUsefulDuplicateAlerts([]);
+      return;
+    }
+
+    const connectedFriends = acceptedFriends || [];
+    const friendIds = connectedFriends.map((friendship) => friendship.friendId);
+
+    if (friendIds.length === 0) {
+      setReceivedFriendMessages([]);
+      setUsefulDuplicateAlerts([]);
+      setSocialNotificationsMessage("");
+      setSocialNotificationsBusy(false);
+      return;
+    }
+
+    if (showLoading) setSocialNotificationsBusy(true);
+    setSocialNotificationsMessage("");
+
+    const [{ data: receivedMessages, error: messagesError }, { data: duplicateRows, error: duplicatesError }] =
+      await Promise.all([
+        supabase
+          .from("friend_messages")
+          .select("id,sender_id,recipient_id,message_code,card_id,created_at")
+          .eq("recipient_id", currentUser.id)
+          .in("sender_id", friendIds)
+          .order("created_at", { ascending: false })
+          .limit(30),
+        supabase
+          .from("collections")
+          .select("user_id,card_id,rarity,dupes,updated_at")
+          .in("user_id", friendIds)
+          .gt("dupes", 0),
+      ]);
+
+    const profilesById = new Map(
+      connectedFriends.map((friendship) => [friendship.friendId, friendship.friendProfile])
+    );
+
+    if (messagesError) {
+      setReceivedFriendMessages([]);
+    } else {
+      setReceivedFriendMessages(
+        (receivedMessages || []).map((messageItem) => ({
+          ...messageItem,
+          friendId: messageItem.sender_id,
+          friendProfile: profilesById.get(messageItem.sender_id) || null,
+          notificationId: `message:${messageItem.id}`,
+        }))
+      );
+    }
+
+    if (duplicatesError) {
+      setUsefulDuplicateAlerts([]);
+    } else {
+      setUsefulDuplicateAlerts(
+        (duplicateRows || [])
+          .map((duplicate) => {
+            const mappedCard = mapOwnedCardToCatalog(duplicate, cardCatalog);
+            const targetCardId = mappedCard.catalogCardId || mappedCard.card_id;
+
+            return {
+              ...mappedCard,
+              friendId: duplicate.user_id,
+              friendProfile: profilesById.get(duplicate.user_id) || null,
+              updated_at: duplicate.updated_at,
+              notificationId:
+                `duplicate:${currentUser.id}:${duplicate.user_id}:${targetCardId}:${duplicate.dupes}`,
+            };
+          })
+          .filter((alert) => !ownershipMap.has(alert.catalogCardId || alert.card_id))
+          .sort((first, second) =>
+            String(second.updated_at || "").localeCompare(String(first.updated_at || ""))
+          )
+      );
+    }
+
+    if (messagesError || duplicatesError) {
+      setSocialNotificationsMessage("Non riesco a caricare tutte le notifiche social.");
+    }
+    setSocialNotificationsBusy(false);
+  }, [cardCatalog, ownershipMap]);
+
+  const loadSocialNotificationsRef = React.useRef(loadSocialNotifications);
+
+  useEffect(() => {
+    loadSocialNotificationsRef.current = loadSocialNotifications;
+    if (!user) return undefined;
+
+    const socialNotificationTimer = window.setTimeout(() => {
+      loadSocialNotifications(user);
+    }, 0);
+
+    return () => window.clearTimeout(socialNotificationTimer);
+  }, [loadSocialNotifications, user]);
+
+  const seenNotificationSet = useMemo(
+    () => new Set(Array.isArray(seenSocialNotificationIds) ? seenSocialNotificationIds : []),
+    [seenSocialNotificationIds]
+  );
+
+  const unseenPassiveNotificationCount = useMemo(
+    () =>
+      [...receivedFriendMessages, ...usefulDuplicateAlerts].filter(
+        (notification) => !seenNotificationSet.has(notification.notificationId)
+      ).length,
+    [receivedFriendMessages, usefulDuplicateAlerts, seenNotificationSet]
+  );
+
+  const notificationCount = friendRequests.length + unseenPassiveNotificationCount;
+
+  useEffect(() => {
+    localStorage.setItem(
+      "rtc_seen_social_notifications",
+      JSON.stringify(Array.isArray(seenSocialNotificationIds) ? seenSocialNotificationIds : [])
+    );
+  }, [seenSocialNotificationIds]);
+
+  useEffect(() => {
+    if (!isNotificationsOpen) return;
+
+    const currentlyVisibleIds = [...receivedFriendMessages, ...usefulDuplicateAlerts].map(
+      (notification) => notification.notificationId
+    );
+    if (currentlyVisibleIds.length === 0) return;
+
+    const rememberTimer = window.setTimeout(() => {
+      setSeenSocialNotificationIds((previousIds) => {
+        const remembered = new Set(Array.isArray(previousIds) ? previousIds : []);
+        let changed = false;
+
+        currentlyVisibleIds.forEach((notificationId) => {
+          if (!remembered.has(notificationId)) {
+            remembered.add(notificationId);
+            changed = true;
+          }
+        });
+
+        return changed ? Array.from(remembered).slice(-240) : previousIds;
+      });
+    }, 0);
+
+    return () => window.clearTimeout(rememberTimer);
+  }, [isNotificationsOpen, receivedFriendMessages, usefulDuplicateAlerts]);
 
   const displayCatalog = useMemo(() => {
     const knownCatalogIds = new Set(cardCatalog.map((card) => card.card_id));
@@ -1039,6 +1293,10 @@ export default function App() {
         setFriends([]);
         setFriendRequests([]);
         setSentFriendRequests([]);
+        friendsRef.current = [];
+        setReceivedFriendMessages([]);
+        setUsefulDuplicateAlerts([]);
+        setSocialNotificationsMessage("");
         setFriendDataMessage("");
         setIsNotificationsOpen(false);
       }
@@ -1060,8 +1318,9 @@ export default function App() {
       loadCards(user);
     }, 0);
 
-    const relatedDataTimer = window.setTimeout(() => {
-      loadFriends(user, { showLoading: true });
+    const relatedDataTimer = window.setTimeout(async () => {
+      const currentFriends = await loadFriends(user, { showLoading: true });
+      loadSocialNotificationsRef.current(user, currentFriends, { showLoading: true });
       loadSnapshots(user);
     }, 0);
 
@@ -1090,15 +1349,48 @@ export default function App() {
           schema: "public",
           table: "friendships",
         },
-        () => {
-          loadFriends(user);
+        async () => {
+          const currentFriends = await loadFriends(user);
+          loadSocialNotificationsRef.current(user, currentFriends);
         }
       )
       .subscribe();
 
-    const refreshFriendData = () => {
+    const messagesChannel = supabase
+      .channel(`friend-messages-live-${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "friend_messages",
+          filter: `recipient_id=eq.${user.id}`,
+        },
+        () => {
+          loadSocialNotificationsRef.current(user);
+        }
+      )
+      .subscribe();
+
+    const friendCollectionsChannel = supabase
+      .channel(`friend-duplicates-live-${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "collections",
+        },
+        () => {
+          loadSocialNotificationsRef.current(user);
+        }
+      )
+      .subscribe();
+
+    const refreshFriendData = async () => {
       if (document.visibilityState === "visible") {
-        loadFriends(user);
+        const currentFriends = await loadFriends(user);
+        loadSocialNotificationsRef.current(user, currentFriends);
       }
     };
     const friendRefreshTimer = window.setInterval(refreshFriendData, 15000);
@@ -1113,6 +1405,8 @@ export default function App() {
       document.removeEventListener("visibilitychange", refreshFriendData);
       supabase.removeChannel(channel);
       supabase.removeChannel(friendshipChannel);
+      supabase.removeChannel(messagesChannel);
+      supabase.removeChannel(friendCollectionsChannel);
     };
   }, [loadCards, loadFriends, loadSnapshots, user]);
 
@@ -1140,29 +1434,32 @@ export default function App() {
 
   return (
     <PageShell isMobile={isMobile}>
-      <header style={headerStyle}>
+      <header style={{ ...headerStyle, ...(isMobile ? mobileHeaderStyle : {}) }}>
         <div>
-          <h1 style={titleStyle}>Release The Creature</h1>
+          <h1 style={{ ...titleStyle, ...(isMobile ? mobileTitleStyle : {}) }}>Release The Creature</h1>
           <p style={subtitleStyle}>
             {t.appSubtitle(TOTAL_DISPLAY_CARDS, TOTAL_CARD_VARIANTS)}
           </p>
         </div>
 
-        <div style={headerActionsStyle}>
+        <div style={{ ...headerActionsStyle, ...(isMobile ? mobileHeaderActionsStyle : {}) }}>
           <button
             type="button"
-            onClick={() => {
+            onClick={async () => {
               const willOpen = !isNotificationsOpen;
               setIsNotificationsOpen(willOpen);
-              if (willOpen) loadFriends(user, { showLoading: true });
+              if (willOpen) {
+                const currentFriends = await loadFriends(user, { showLoading: true });
+                loadSocialNotificationsRef.current(user, currentFriends, { showLoading: true });
+              }
             }}
             style={notificationTriggerStyle}
             aria-expanded={isNotificationsOpen}
-            aria-label={`${t.notifications}: ${friendRequests.length}`}
+            aria-label={`${t.notifications}: ${notificationCount}`}
           >
             <span>{t.notifications}</span>
-            {friendRequests.length > 0 && (
-              <span style={notificationBadgeStyle}>{friendRequests.length}</span>
+            {notificationCount > 0 && (
+              <span style={notificationBadgeStyle}>{notificationCount}</span>
             )}
           </button>
 
@@ -1183,10 +1480,23 @@ export default function App() {
             <NotificationCenter
               t={t}
               requests={friendRequests}
-              busy={friendDataBusy}
-              message={friendDataMessage}
+              messages={receivedFriendMessages}
+              duplicateAlerts={usefulDuplicateAlerts}
+              seenIds={seenNotificationSet}
+              cardCatalog={cardCatalog}
+              isMobile={isMobile}
+              busy={friendDataBusy || socialNotificationsBusy}
+              message={friendDataMessage || socialNotificationsMessage}
               onRespond={respondToRequest}
-              onRefresh={() => loadFriends(user, { showLoading: true })}
+              onRefresh={async () => {
+                const currentFriends = await loadFriends(user, { showLoading: true });
+                loadSocialNotificationsRef.current(user, currentFriends, { showLoading: true });
+              }}
+              onOpenFriend={async (friendId) => {
+                setActiveTab("friends");
+                setIsNotificationsOpen(false);
+                await loadFriendStats(friendId);
+              }}
               onOpenFriends={() => {
                 setActiveTab("friends");
                 setIsNotificationsOpen(false);
@@ -1201,7 +1511,7 @@ export default function App() {
       {confettiActive && <ConfettiOverlay />}
 
       {/* TAB NAVIGATION */}
-      <div style={tabNavStyle}>
+      {!isMobile && <div style={tabNavStyle}>
         {["collection", "duplicates", "friends", "progress"].map(tab => (
           <button key={tab} type="button"
             onClick={() => setActiveTab(tab)}
@@ -1221,7 +1531,7 @@ export default function App() {
             </span>
           </button>
         ))}
-      </div>
+      </div>}
 
       {activeTab === "duplicates" && (
         <DuplicatesPanel
@@ -1271,6 +1581,7 @@ export default function App() {
           onSendMessage={sendFriendMessage}
           onRefreshMessages={loadFriendMessages}
           cardCatalog={cardCatalog}
+          isMobile={isMobile}
         />
       )}
 
@@ -1413,7 +1724,7 @@ export default function App() {
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Cerca carta..."
-          style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 18 }}
+          style={{ ...inputStyle, flex: 1, minWidth: isMobile ? "100%" : 220, fontSize: 18 }}
         />
 
         <select
@@ -1503,7 +1814,7 @@ export default function App() {
 
       {/* Bottom Bar Mobile Style Navigation */}
       {isMobile && (
-        <nav style={{ ...bottomNavigationStyle, gridTemplateColumns: "repeat(5, 1fr)" }}>
+        <nav style={{ ...bottomNavigationStyle, gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }} aria-label="Navigazione principale">
           {["collection", "duplicates", "friends", "progress"].map(tab => (
             <button key={tab} type="button" style={{ ...bottomNavTabStyle, borderTop: activeTab === tab ? "2px solid var(--accent-green)" : "2px solid transparent" }} onClick={() => setActiveTab(tab)}>
               <span style={bottomNavLabelStyle}>
@@ -1521,8 +1832,7 @@ export default function App() {
             </button>
           ))}
           <button type="button" style={bottomNavTabStyle} onClick={() => setIsSettingsOpen(true)}>
-            <span style={{ fontSize: 18 }}>⚙️</span>
-            <span style={bottomNavLabelStyle}>{t.settings}</span>
+            <span style={bottomNavLabelStyle}>{t.more}</span>
           </button>
         </nav>
       )}
@@ -1609,7 +1919,9 @@ function PageShell({ children, center = false, isMobile = false }) {
   return (
     <div style={{
       ...pageStyle,
-      paddingBottom: isMobile ? 84 : 12 // Spazio extra in basso per non far coprire i contenuti dalla bottom bar mobile
+      padding: isMobile
+        ? "max(14px, env(safe-area-inset-top)) 12px calc(86px + env(safe-area-inset-bottom))"
+        : pageStyle.padding,
     }}>
       <main style={center ? centerShellStyle : shellStyle}>{children}</main>
     </div>
@@ -1784,41 +2096,135 @@ function EmptyState({ text }) {
   return <div style={emptyStyle}>{text}</div>;
 }
 
-function NotificationCenter({ t, requests, busy, message, onRespond, onRefresh, onOpenFriends, onClose }) {
+function NotificationCenter({
+  t,
+  requests,
+  messages,
+  duplicateAlerts,
+  seenIds,
+  cardCatalog,
+  isMobile,
+  busy,
+  message,
+  onRespond,
+  onRefresh,
+  onOpenFriend,
+  onOpenFriends,
+  onClose,
+}) {
+  const hasNotifications =
+    requests.length > 0 || messages.length > 0 || duplicateAlerts.length > 0;
+
   return (
-    <section style={notificationCenterStyle} aria-label={t.notifications}>
+    <section
+      style={{
+        ...notificationCenterStyle,
+        ...(isMobile ? mobileNotificationCenterStyle : {}),
+      }}
+      aria-label={t.notifications}
+    >
       <div style={notificationHeaderStyle}>
         <h2 style={{ ...sectionTitleStyle, fontSize: 17 }}>{t.notifications}</h2>
         <button type="button" onClick={onClose} style={modalCloseButtonStyle}>X</button>
       </div>
       <div style={notificationBodyStyle}>
         {message && <div style={{ ...messageStyle, marginBottom: 0 }}>{message}</div>}
-        {requests.length === 0 ? (
-          <div style={notificationEmptyStyle}>{busy ? t.loading : t.noPendingRequests}</div>
-        ) : (
-          requests.map((request) => {
-            const username =
-              request.requesterProfile?.username || request.requester_id.slice(0, 8);
-            return (
-              <div key={request.id} style={notificationItemStyle}>
-                <div>
-                  <div style={{ fontWeight: 800, color: "var(--text-heading)" }}>{username}</div>
-                  <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
-                    {t.pendingRequests}
+        {!hasNotifications ? (
+          <div style={notificationEmptyStyle}>{busy ? t.loading : t.noNotifications}</div>
+        ) : null}
+
+        {requests.length > 0 && (
+          <section style={notificationGroupStyle}>
+            <h3 style={notificationGroupTitleStyle}>{t.friendRequestsLabel}</h3>
+            {requests.map((request) => {
+              const username =
+                request.requesterProfile?.username || request.requester_id.slice(0, 8);
+              return (
+                <div key={request.id} style={notificationItemStyle}>
+                  <div>
+                    <div style={{ fontWeight: 800, color: "var(--text-heading)" }}>{username}</div>
+                    <div style={notificationMetaStyle}>{t.pendingRequests}</div>
+                  </div>
+                  <div style={notificationActionStyle}>
+                    <button type="button" onClick={() => onRespond(request.id, true)} style={inlineFormSubmitStyle}>
+                      {t.accept}
+                    </button>
+                    <button type="button" onClick={() => onRespond(request.id, false)} style={bulkDeleteButtonStyle}>
+                      {t.decline}
+                    </button>
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button type="button" onClick={() => onRespond(request.id, true)} style={inlineFormSubmitStyle}>
-                    {t.accept}
-                  </button>
-                  <button type="button" onClick={() => onRespond(request.id, false)} style={bulkDeleteButtonStyle}>
-                    {t.decline}
+              );
+            })}
+          </section>
+        )}
+
+        {messages.length > 0 && (
+          <section style={notificationGroupStyle}>
+            <h3 style={notificationGroupTitleStyle}>{t.messages}</h3>
+            {messages.map((notification) => {
+              const username =
+                notification.friendProfile?.username || notification.sender_id.slice(0, 8);
+              const isUnread = !seenIds.has(notification.notificationId);
+
+              return (
+                <div key={notification.notificationId} style={notificationItemStyle}>
+                  <div style={notificationContentStyle}>
+                    <div style={notificationTitleRowStyle}>
+                      <strong style={{ color: "var(--text-heading)" }}>{username}</strong>
+                      {isUnread && <span style={newNotificationPillStyle}>Nuovo</span>}
+                    </div>
+                    <div style={notificationMetaStyle}>{t.messageReceived}</div>
+                    <div style={notificationTextStyle}>
+                      {quickMessageText(notification, cardCatalog)}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onOpenFriend(notification.friendId)}
+                    style={{ ...inlineSettingButtonStyle, width: "auto", marginTop: 0 }}
+                  >
+                    {t.openFriend}
                   </button>
                 </div>
-              </div>
-            );
-          })
+              );
+            })}
+          </section>
         )}
+
+        {duplicateAlerts.length > 0 && (
+          <section style={notificationGroupStyle}>
+            <h3 style={notificationGroupTitleStyle}>{t.usefulDupes}</h3>
+            {duplicateAlerts.map((notification) => {
+              const username =
+                notification.friendProfile?.username || notification.friendId.slice(0, 8);
+              const isUnread = !seenIds.has(notification.notificationId);
+
+              return (
+                <div key={notification.notificationId} style={notificationItemStyle}>
+                  <div style={notificationContentStyle}>
+                    <div style={notificationTitleRowStyle}>
+                      <strong style={{ color: "var(--text-heading)" }}>{username}</strong>
+                      {isUnread && <span style={newNotificationPillStyle}>Nuovo</span>}
+                    </div>
+                    <div style={notificationMetaStyle}>{t.usefulDupeAlert}</div>
+                    <div style={notificationTextStyle}>
+                      {notification.name} - {notification.rarity} ({notification.dupes})
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onOpenFriend(notification.friendId)}
+                    style={{ ...inlineSettingButtonStyle, width: "auto", marginTop: 0 }}
+                  >
+                    {t.openFriend}
+                  </button>
+                </div>
+              );
+            })}
+          </section>
+        )}
+
         <div style={notificationFooterStyle}>
           <button type="button" onClick={onRefresh} style={inlineSettingButtonStyle}>
             {busy ? t.loading : t.refresh}
@@ -2492,8 +2898,22 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
   friendSearchResult, friendSearchBusy, friendSearchMsg, onSearch, onSendRequest, onRespond,
   onRefresh, onRemove, onViewFriend, viewingFriend, friendStats, onBackToMine, collectionCards,
   ownershipMap, friendMessages, friendMessagesBusy, friendMessageSending, friendMessageStatus,
-  onSendMessage, onRefreshMessages, cardCatalog }) {
+  onSendMessage, onRefreshMessages, cardCatalog, isMobile }) {
   const [tradeListOpen, setTradeListOpen] = useState(false);
+  const panelStyle = {
+    ...trackingPanelStyle,
+    ...(isMobile ? mobilePanelStyle : {}),
+  };
+  const rowStyle = {
+    ...socialRowStyle,
+    ...(isMobile ? mobileSocialRowStyle : {}),
+  };
+  const actionsStyle = {
+    display: "flex",
+    gap: 8,
+    ...(isMobile ? { width: "100%" } : {}),
+  };
+  const actionButtonStyle = isMobile ? { flex: 1 } : {};
   const myTradeSections = buildDuplicateSections(
     collectionCards.filter((card) => (card.dupes || 0) > 0)
   );
@@ -2508,7 +2928,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
         <button type="button" onClick={onBackToMine} style={{ ...inlineSettingButtonStyle, width: "auto", display: "inline-flex", alignItems: "center", gap: 8 }}>
           {t.backToMine}
         </button>
-        <div style={{ ...trackingPanelStyle, marginBottom: 0 }}>
+        <div style={{ ...panelStyle, marginBottom: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <div style={{ ...avatarStyle, width: 48, height: 48, fontSize: 20 }}>
               {(friendStats.username || "?").slice(0, 2).toUpperCase()}
@@ -2530,9 +2950,9 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
           </div>
         </div>
 
-        <div style={trackingPanelStyle}>
+        <div style={panelStyle}>
           <h3 style={sectionTitleStyle}>Doppie che ti mancano</h3>
-          <p style={sectionTextStyle}>Carte che {friendStats.username} ha in copia extra e che non risultano nella tua collezione.</p>
+          <p style={sectionTextStyle}>Carte che {friendStats.username} ha in copia extra. Apri solo il set che ti interessa per richiedere una carta.</p>
           {usefulTrades.length === 0 ? (
             <div style={emptyStyle}>Nessun doppione utile per completare la tua collezione.</div>
           ) : (
@@ -2554,6 +2974,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
           sending={friendMessageSending}
           status={friendMessageStatus}
           cardCatalog={cardCatalog}
+          isMobile={isMobile}
           onSend={onSendMessage}
           onRefresh={onRefreshMessages}
         />
@@ -2564,7 +2985,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
   return (
     <div style={{ display: "grid", gap: 16 }}>
       {/* Cerca amico */}
-      <div style={trackingPanelStyle}>
+      <div style={panelStyle}>
         <h3 style={sectionTitleStyle}>{t.friendsTitle}</h3>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input
@@ -2573,9 +2994,9 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
             value={friendSearchEmail}
             onChange={e => setFriendSearchEmail(e.target.value)}
             onKeyDown={e => e.key === "Enter" && onSearch()}
-            style={{ ...inputStyle, flex: 1, minWidth: 180, fontSize: 15 }}
+            style={{ ...inputStyle, flex: 1, minWidth: isMobile ? "100%" : 180, fontSize: 15 }}
           />
-          <button type="button" onClick={onSearch} disabled={friendSearchBusy} style={buttonStyle}>
+          <button type="button" onClick={onSearch} disabled={friendSearchBusy} style={{ ...buttonStyle, ...(isMobile ? { width: "100%" } : {}) }}>
             {friendSearchBusy ? "..." : "🔍"}
           </button>
         </div>
@@ -2583,12 +3004,12 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
         {friendSearchMsg && <div style={messageStyle}>{friendSearchMsg}</div>}
 
         {friendSearchResult && (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)" }}>
+          <div style={rowStyle}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ ...avatarStyle, width: 36, height: 36 }}>{(friendSearchResult.username || "?").slice(0,2).toUpperCase()}</div>
               <span style={{ fontWeight: 800, color: "var(--text-heading)" }}>{friendSearchResult.username || friendSearchResult.id.slice(0,8)}</span>
             </div>
-            <button type="button" onClick={() => onSendRequest(friendSearchResult.id)} style={inlineFormSubmitStyle}>
+            <button type="button" onClick={() => onSendRequest(friendSearchResult.id)} style={{ ...inlineFormSubmitStyle, ...actionButtonStyle }}>
               {t.sendRequest}
             </button>
           </div>
@@ -2596,7 +3017,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
       </div>
 
       {/* Richieste in arrivo */}
-      <div style={trackingPanelStyle}>
+      <div style={panelStyle}>
         <div style={panelHeaderRowStyle}>
           <h3 style={sectionTitleStyle}>
             {t.pendingRequests}
@@ -2614,14 +3035,14 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
         ) : (
           <div style={{ display: "grid", gap: 10 }}>
           {friendRequests.map(req => (
-            <div key={req.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)" }}>
+            <div key={req.id} style={rowStyle}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ ...avatarStyle, width: 34, height: 34, fontSize: 13 }}>{(req.requesterProfile?.username || "?").slice(0,2).toUpperCase()}</div>
                 <span style={{ fontWeight: 800, color: "var(--text-heading)" }}>{req.requesterProfile?.username || req.requester_id.slice(0,8)}</span>
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button type="button" onClick={() => onRespond(req.id, true)} style={inlineFormSubmitStyle}>{t.accept}</button>
-                <button type="button" onClick={() => onRespond(req.id, false)} style={bulkDeleteButtonStyle}>{t.decline}</button>
+              <div style={actionsStyle}>
+                <button type="button" onClick={() => onRespond(req.id, true)} style={{ ...inlineFormSubmitStyle, ...actionButtonStyle }}>{t.accept}</button>
+                <button type="button" onClick={() => onRespond(req.id, false)} style={{ ...bulkDeleteButtonStyle, ...actionButtonStyle }}>{t.decline}</button>
               </div>
             </div>
           ))}
@@ -2629,7 +3050,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
         )}
       </div>
 
-      <div style={trackingPanelStyle}>
+      <div style={panelStyle}>
         <h3 style={sectionTitleStyle}>{t.sentRequests}</h3>
         {sentFriendRequests.length === 0 ? (
           <div style={compactEmptyStyle}>{t.noSentRequests}</div>
@@ -2653,7 +3074,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
       </div>
 
       {/* Lista amici */}
-      <div style={trackingPanelStyle}>
+      <div style={panelStyle}>
         <h3 style={sectionTitleStyle}>{t.yourFriends}</h3>
         {friends.length === 0 ? (
           <div style={emptyStyle}>{t.noFriends}</div>
@@ -2664,14 +3085,14 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
               const friendId = isRequester ? f.addressee_id : f.requester_id;
               const friendUsername = f.friendProfile?.username;
               return (
-                <div key={f.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)" }}>
+                <div key={f.id} style={rowStyle}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <div style={{ ...avatarStyle, width: 36, height: 36 }}>{(friendUsername || "?").slice(0,2).toUpperCase()}</div>
                     <span style={{ fontWeight: 800, color: "var(--text-heading)" }}>{friendUsername || friendId.slice(0,8)}</span>
                   </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button type="button" onClick={() => onViewFriend(friendId)} style={inlineFormSubmitStyle}>{t.viewCollection}</button>
-                    <button type="button" onClick={() => onRemove(f.id)} style={bulkDeleteButtonStyle}>{t.removeFriend}</button>
+                  <div style={actionsStyle}>
+                    <button type="button" onClick={() => onViewFriend(friendId)} style={{ ...inlineFormSubmitStyle, ...actionButtonStyle }}>{t.viewCollection}</button>
+                    <button type="button" onClick={() => onRemove(f.id)} style={{ ...bulkDeleteButtonStyle, ...actionButtonStyle }}>{t.removeFriend}</button>
                   </div>
                 </div>
               );
@@ -2680,7 +3101,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
         )}
       </div>
 
-      <section style={trackingPanelStyle}>
+      <section style={panelStyle}>
         <button
           type="button"
           style={collapsibleHeaderStyle}
@@ -2745,47 +3166,81 @@ function ReadOnlyTradeSections({ sections }) {
 }
 
 function TradeOfferSections({ sections, friendId, sending, onRequest }) {
+  const [expandedSections, setExpandedSections] = useState({});
+
+  function toggleSection(sectionKey) {
+    setExpandedSections((currentSections) => ({
+      ...currentSections,
+      [sectionKey]: !currentSections[sectionKey],
+    }));
+  }
+
   return (
-    <div style={duplicateSectionListStyle}>
-      {sections.map((section) => (
-        <div key={section.key} style={duplicateSectionStyle}>
-          <div style={duplicateSectionHeaderStyle}>
-            <span style={duplicateSectionTitleStyle}>{section.title}</span>
-            <span style={duplicateSectionCountStyle}>{section.dupes} doppioni utili</span>
-          </div>
-          {section.groups.map((group) => (
-            <div key={group.id} style={tradeOfferGroupStyle}>
-              <span style={duplicateNameStyle}>{group.name}</span>
-              {group.variants.map((variant) => {
-                const meta = getRarityMeta(variant.rarity);
-                const pendingKey = `need_card:${variant.card_id}`;
-                return (
-                  <div key={variant.card_id} style={tradeVariantOfferStyle}>
-                    <span style={{ ...variantDupeBadgeStyle, borderColor: `${meta.color}66`, color: meta.color }}>
-                      {meta.label}: {variant.dupes} doppie
-                    </span>
-                    <button
-                      type="button"
-                      style={duplicateAddButtonStyle}
-                      onClick={() => onRequest(friendId, "need_card", variant.card_id)}
-                      disabled={sending === pendingKey}
-                    >
-                      {sending === pendingKey ? "Invio..." : "Mi serve questa"}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-      ))}
+    <div style={compactTradeSectionListStyle}>
+      {sections.map((section) => {
+        const sectionIsOpen = Boolean(expandedSections[section.key]);
+        return (
+          <section key={section.key} style={compactTradeSectionStyle}>
+            <button
+              type="button"
+              style={compactTradeSectionButtonStyle}
+              onClick={() => toggleSection(section.key)}
+              aria-expanded={sectionIsOpen}
+            >
+              <span style={compactTradeSectionInfoStyle}>
+                <strong style={duplicateSectionTitleStyle}>{section.title}</strong>
+                <span style={compactTradeSummaryStyle}>
+                  {section.groups.length} carte · {section.dupes} doppioni utili
+                </span>
+              </span>
+              <span style={expandIndicatorStyle}>{sectionIsOpen ? "−" : "+"}</span>
+            </button>
+
+            {sectionIsOpen && (
+              <div style={compactTradeGridStyle}>
+                {section.groups.map((group) => (
+                  <article key={group.id} style={compactTradeCardStyle}>
+                    <div style={compactTradeCardHeaderStyle}>
+                      <span style={duplicateNameStyle}>{group.name}</span>
+                      <span style={compactTradeCardCountStyle}>
+                        {group.variants.reduce((total, variant) => total + variant.dupes, 0)} disponibili
+                      </span>
+                    </div>
+                    <div style={compactTradeVariantListStyle}>
+                      {group.variants.map((variant) => {
+                        const meta = getRarityMeta(variant.rarity);
+                        const pendingKey = `need_card:${variant.card_id}`;
+                        return (
+                          <div key={variant.card_id} style={compactTradeVariantStyle}>
+                            <span style={{ ...compactVariantBadgeStyle, borderColor: `${meta.color}66`, color: meta.color }}>
+                              {meta.label} · {variant.dupes}
+                            </span>
+                            <button
+                              type="button"
+                              style={compactTradeRequestButtonStyle}
+                              onClick={() => onRequest(friendId, "need_card", variant.card_id)}
+                              disabled={sending === pendingKey}
+                            >
+                              {sending === pendingKey ? "Invio..." : "Richiedi"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        );
+      })}
     </div>
   );
 }
 
-function FriendQuickChat({ friendId, friendName, userId, messages, loading, sending, status, cardCatalog, onSend, onRefresh }) {
+function FriendQuickChat({ friendId, friendName, userId, messages, loading, sending, status, cardCatalog, isMobile, onSend, onRefresh }) {
   return (
-    <section style={trackingPanelStyle}>
+    <section style={{ ...trackingPanelStyle, ...(isMobile ? mobilePanelStyle : {}) }}>
       <div style={chatHeaderStyle}>
         <div>
           <h3 style={sectionTitleStyle}>Messaggi rapidi</h3>
@@ -2848,10 +3303,14 @@ function FriendQuickChat({ friendId, friendName, userId, messages, loading, send
 function DuplicatesPanel({ duplicateCards, totalDupes, variantBusy, onIncrementDupe, onDecrementDupe, isMobile }) {
   const sections = buildDuplicateSections(duplicateCards);
   const uniqueRepeatedCards = sections.reduce((total, section) => total + section.groups.length, 0);
+  const panelStyle = {
+    ...trackingPanelStyle,
+    ...(isMobile ? mobilePanelStyle : {}),
+  };
 
   return (
     <div style={duplicatesLayoutStyle}>
-      <section style={trackingPanelStyle}>
+      <section style={panelStyle}>
         <div style={duplicatesHeaderStyle}>
           <div>
             <h2 style={sectionTitleStyle}>Doppioni</h2>
@@ -2878,7 +3337,7 @@ function DuplicatesPanel({ duplicateCards, totalDupes, variantBusy, onIncrementD
         </div>
       </section>
 
-      <section style={trackingPanelStyle}>
+      <section style={panelStyle}>
         <div style={cardBrowserHeaderStyle}>
           <h2 style={sectionTitleStyle}>Carte doppie</h2>
           <span style={gridCountStyle}>{uniqueRepeatedCards} carte</span>
@@ -3081,6 +3540,12 @@ const headerStyle = {
   flexWrap: "wrap",
 };
 
+const mobileHeaderStyle = {
+  alignItems: "start",
+  gap: 14,
+  marginBottom: 18,
+};
+
 const titleStyle = {
   color: "var(--text-heading)",
   fontSize: "clamp(26px, 5vw, 42px)",
@@ -3088,6 +3553,10 @@ const titleStyle = {
   margin: 0,
   fontWeight: 900,
   letterSpacing: "-0.5px",
+};
+
+const mobileTitleStyle = {
+  fontSize: "clamp(25px, 8.2vw, 34px)",
 };
 
 const subtitleStyle = {
@@ -3111,6 +3580,11 @@ const headerActionsStyle = {
   display: "flex",
   alignItems: "center",
   gap: 8,
+};
+
+const mobileHeaderActionsStyle = {
+  width: "100%",
+  justifyContent: "flex-start",
 };
 
 const notificationTriggerStyle = {
@@ -3155,6 +3629,17 @@ const notificationCenterStyle = {
   boxShadow: "var(--modal-shadow)",
 };
 
+const mobileNotificationCenterStyle = {
+  position: "fixed",
+  top: "auto",
+  left: 12,
+  right: 12,
+  bottom: "calc(66px + env(safe-area-inset-bottom))",
+  width: "auto",
+  maxHeight: "calc(100dvh - 92px - env(safe-area-inset-bottom))",
+  borderRadius: 14,
+};
+
 const notificationHeaderStyle = {
   padding: "14px 16px",
   borderBottom: "1px solid var(--border)",
@@ -3168,6 +3653,8 @@ const notificationBodyStyle = {
   display: "grid",
   gap: 10,
   padding: 12,
+  maxHeight: "min(62vh, 560px)",
+  overflowY: "auto",
 };
 
 const notificationEmptyStyle = {
@@ -3186,6 +3673,60 @@ const notificationItemStyle = {
   border: "1px solid var(--border)",
   borderRadius: 9,
   padding: "10px 12px",
+};
+
+const notificationGroupStyle = {
+  display: "grid",
+  gap: 8,
+};
+
+const notificationGroupTitleStyle = {
+  margin: "2px 0 0",
+  color: "var(--text-secondary)",
+  fontSize: 11,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  fontWeight: 900,
+};
+
+const notificationMetaStyle = {
+  color: "var(--text-secondary)",
+  fontSize: 12,
+};
+
+const notificationActionStyle = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+};
+
+const notificationContentStyle = {
+  display: "grid",
+  gap: 3,
+  minWidth: 0,
+};
+
+const notificationTitleRowStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  flexWrap: "wrap",
+};
+
+const notificationTextStyle = {
+  color: "var(--text-primary)",
+  fontSize: 13,
+  overflowWrap: "anywhere",
+};
+
+const newNotificationPillStyle = {
+  background: "var(--success-bg)",
+  border: "1px solid var(--success-border)",
+  color: "var(--success-text)",
+  borderRadius: 99,
+  padding: "2px 6px",
+  fontSize: 10,
+  fontWeight: 900,
 };
 
 const notificationFooterStyle = {
@@ -3313,6 +3854,12 @@ const trackingPanelStyle = {
   display: "grid",
   gap: 16,
   boxShadow: "var(--card-shadow)",
+};
+
+const mobilePanelStyle = {
+  padding: 14,
+  marginBottom: 12,
+  gap: 12,
 };
 
 const progressSummaryGridStyle = {
@@ -3702,7 +4249,7 @@ const bottomNavigationStyle = {
   bottom: 0,
   left: 0,
   right: 0,
-  height: 64,
+  height: "calc(58px + env(safe-area-inset-bottom))",
   background: "var(--nav-bg)",
   borderTop: "1px solid var(--border)",
   display: "grid",
@@ -3720,16 +4267,22 @@ const bottomNavTabStyle = {
   flexDirection: "column",
   alignItems: "center",
   justifyContent: "center",
-  gap: 4,
+  gap: 2,
+  minWidth: 0,
+  padding: "0 3px env(safe-area-inset-bottom)",
   cursor: "pointer",
   outline: "none",
   WebkitTapHighlightColor: "transparent",
 };
 
 const bottomNavLabelStyle = {
-  fontSize: 11,
+  fontSize: 10,
   color: "var(--text-secondary)",
   fontWeight: 700,
+  whiteSpace: "nowrap",
+  maxWidth: "100%",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
 };
 
 const modalOverlayStyle = {
@@ -3927,6 +4480,23 @@ const compactEmptyStyle = {
   borderRadius: 9,
   padding: 14,
   fontSize: 13,
+};
+
+const socialRowStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 10,
+  padding: "10px 14px",
+  background: "var(--surface-2)",
+  borderRadius: 10,
+  border: "1px solid var(--border)",
+};
+
+const mobileSocialRowStyle = {
+  alignItems: "stretch",
+  flexDirection: "column",
+  padding: 10,
 };
 
 const requestSummaryStyle = {
@@ -4235,21 +4805,111 @@ const collapsedBodyStyle = {
   paddingTop: 4,
 };
 
-const tradeOfferGroupStyle = {
+const compactTradeSectionListStyle = {
   display: "grid",
-  gap: 8,
-  background: "var(--surface-2)",
-  border: "1px solid var(--border)",
-  borderRadius: 8,
-  padding: "10px 12px",
+  gap: 10,
 };
 
-const tradeVariantOfferStyle = {
+const compactTradeSectionStyle = {
+  display: "grid",
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  overflow: "hidden",
+};
+
+const compactTradeSectionButtonStyle = {
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
-  flexWrap: "wrap",
+  gap: 12,
+  width: "100%",
+  border: "none",
+  background: "transparent",
+  padding: "12px 13px",
+  color: "var(--text-heading)",
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+const compactTradeSectionInfoStyle = {
+  display: "grid",
+  gap: 3,
+  minWidth: 0,
+};
+
+const compactTradeSummaryStyle = {
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 700,
+};
+
+const compactTradeGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 250px), 1fr))",
   gap: 8,
+  padding: "0 10px 10px",
+};
+
+const compactTradeCardStyle = {
+  display: "grid",
+  gap: 7,
+  minWidth: 0,
+  background: "var(--surface-1)",
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  padding: "9px 10px",
+};
+
+const compactTradeCardHeaderStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 6,
+};
+
+const compactTradeCardCountStyle = {
+  color: "var(--text-muted)",
+  fontSize: 11,
+  fontWeight: 700,
+};
+
+const compactTradeVariantListStyle = {
+  display: "grid",
+  gap: 6,
+};
+
+const compactTradeVariantStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 7,
+};
+
+const compactVariantBadgeStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  background: "var(--surface-2)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 7,
+  padding: "5px 7px",
+  fontSize: 12,
+  fontWeight: 800,
+  whiteSpace: "nowrap",
+};
+
+const compactTradeRequestButtonStyle = {
+  background: "var(--success-bg)",
+  border: "1px solid var(--success-border)",
+  color: "var(--success-text)",
+  borderRadius: 7,
+  minHeight: 32,
+  padding: "4px 10px",
+  fontSize: 12,
+  fontWeight: 900,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };
 
 const tradeRowStyle = {

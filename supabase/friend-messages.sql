@@ -80,3 +80,17 @@ create index if not exists friend_messages_conversation_created_idx
 
 create index if not exists friend_messages_recipient_id_idx
   on public.friend_messages (recipient_id);
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'friend_messages'
+  ) then
+    alter publication supabase_realtime add table public.friend_messages;
+  end if;
+end
+$$;
