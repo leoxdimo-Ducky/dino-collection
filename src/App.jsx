@@ -104,6 +104,7 @@ const T = {
     collection: "Collezione",
     duplicates: "Doppioni",
     friends: "Amici",
+    notifications: "Notifiche",
     progress: "Progressione",
     settings: "Impostazioni",
     loading: "Caricamento...",
@@ -126,6 +127,12 @@ const T = {
     removeFriend: "Rimuovi",
     noFriends: "Nessun amico ancora. Cerca un utente per email per iniziare!",
     pendingRequests: "Richieste in arrivo",
+    sentRequests: "Richieste inviate",
+    noPendingRequests: "Nessuna richiesta in arrivo.",
+    noSentRequests: "Nessuna richiesta in attesa di risposta.",
+    pendingReply: "In attesa di risposta",
+    refresh: "Aggiorna",
+    friendshipLoadError: "Non riesco a caricare richieste e amicizie.",
     yourFriends: "I tuoi amici",
     viewCollection: "Vedi collezione",
     backToMine: "← Torna alla mia collezione",
@@ -162,6 +169,7 @@ const T = {
     collection: "Collection",
     duplicates: "Duplicates",
     friends: "Friends",
+    notifications: "Notifications",
     progress: "Progress",
     settings: "Settings",
     loading: "Loading...",
@@ -184,6 +192,12 @@ const T = {
     removeFriend: "Remove",
     noFriends: "No friends yet. Search a user by email to start!",
     pendingRequests: "Incoming requests",
+    sentRequests: "Sent requests",
+    noPendingRequests: "No incoming requests.",
+    noSentRequests: "No requests waiting for a response.",
+    pendingReply: "Waiting for a response",
+    refresh: "Refresh",
+    friendshipLoadError: "I cannot load friend requests and friendships.",
     yourFriends: "Your friends",
     viewCollection: "View collection",
     backToMine: "← Back to my collection",
@@ -245,6 +259,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("collection"); // "collection"|"friends"|"progress"
   const [friends, setFriends] = useState([]);
   const [friendRequests, setFriendRequests] = useState([]);
+  const [sentFriendRequests, setSentFriendRequests] = useState([]);
+  const [friendDataBusy, setFriendDataBusy] = useState(false);
+  const [friendDataMessage, setFriendDataMessage] = useState("");
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [friendSearchEmail, setFriendSearchEmail] = useState("");
   const [friendSearchResult, setFriendSearchResult] = useState(null);
   const [friendSearchBusy, setFriendSearchBusy] = useState(false);
@@ -372,20 +390,95 @@ export default function App() {
   }, []);
 
   // --- AMICIZIE ---
-  const loadFriends = useCallback(async (currentUser) => {
-    if (!currentUser) return;
-    const { data } = await supabase.from("friendships")
-      .select("id,requester_id,addressee_id,status,profiles!friendships_requester_id_fkey(username),profiles!friendships_addressee_id_fkey(username)")
-      .or(`requester_id.eq.${currentUser.id},addressee_id.eq.${currentUser.id}`)
-      .eq("status", "accepted");
-    setFriends(data || []);
+  const loadFriends = useCallback(async (currentUser, { showLoading = false } = {}) => {
+    if (!currentUser) {
+      setFriends([]);
+      setFriendRequests([]);
+      setSentFriendRequests([]);
+      return;
+    }
 
-    const { data: reqs } = await supabase.from("friendships")
-      .select("id,requester_id,profiles!friendships_requester_id_fkey(username,id)")
-      .eq("addressee_id", currentUser.id)
-      .eq("status", "pending");
-    setFriendRequests(reqs || []);
-  }, []);
+    if (showLoading) {
+      setFriendDataBusy(true);
+    }
+    setFriendDataMessage("");
+
+    const { data: friendshipRows, error } = await supabase
+      .from("friendships")
+      .select("id,requester_id,addressee_id,status")
+      .or(`requester_id.eq.${currentUser.id},addressee_id.eq.${currentUser.id}`)
+      .in("status", ["accepted", "pending"]);
+
+    if (error) {
+      setFriends([]);
+      setFriendRequests([]);
+      setSentFriendRequests([]);
+      setFriendDataMessage(t.friendshipLoadError);
+      setFriendDataBusy(false);
+      return;
+    }
+
+    const rows = friendshipRows || [];
+    const acceptedRows = rows.filter((friendship) => friendship.status === "accepted");
+    const incomingRequests = rows.filter(
+      (friendship) =>
+        friendship.status === "pending" && friendship.addressee_id === currentUser.id
+    );
+    const outgoingRequests = rows.filter(
+      (friendship) =>
+        friendship.status === "pending" && friendship.requester_id === currentUser.id
+    );
+    const visibleProfileIds = new Set();
+
+    acceptedRows.forEach((friendship) => {
+      visibleProfileIds.add(
+        friendship.requester_id === currentUser.id
+          ? friendship.addressee_id
+          : friendship.requester_id
+      );
+    });
+    incomingRequests.forEach((friendship) => visibleProfileIds.add(friendship.requester_id));
+    outgoingRequests.forEach((friendship) => visibleProfileIds.add(friendship.addressee_id));
+
+    let profilesById = new Map();
+    if (visibleProfileIds.size > 0) {
+      const { data: visibleProfiles, error: profileError } = await supabase
+        .from("profiles")
+        .select("id,username")
+        .in("id", [...visibleProfileIds]);
+
+      if (profileError) {
+        setFriendDataMessage(t.friendshipLoadError);
+      } else {
+        profilesById = new Map(
+          (visibleProfiles || []).map((profile) => [profile.id, profile])
+        );
+      }
+    }
+
+    setFriends(
+      acceptedRows.map((friendship) => {
+        const friendId =
+          friendship.requester_id === currentUser.id
+            ? friendship.addressee_id
+            : friendship.requester_id;
+        return { ...friendship, friendProfile: profilesById.get(friendId) || null };
+      })
+    );
+    setFriendRequests(
+      incomingRequests.map((request) => ({
+        ...request,
+        requesterProfile: profilesById.get(request.requester_id) || null,
+      }))
+    );
+    setSentFriendRequests(
+      outgoingRequests.map((request) => ({
+        ...request,
+        addresseeProfile: profilesById.get(request.addressee_id) || null,
+      }))
+    );
+    setFriendDataBusy(false);
+  }, [t.friendshipLoadError]);
 
   async function searchFriendByNickname() {
     setFriendSearchBusy(true);
@@ -416,17 +509,37 @@ export default function App() {
 
   async function sendFriendRequest(addresseeId) {
     const { error } = await supabase.from("friendships").insert({ requester_id: user.id, addressee_id: addresseeId, status: "pending" });
-    if (error) setFriendSearchMsg("Richiesta già inviata o amici.");
-    else { setFriendSearchMsg("Richiesta inviata!"); setFriendSearchResult(null); setFriendSearchEmail(""); }
+    if (error?.code === "23505") {
+      setFriendSearchMsg("Richiesta già inviata o amicizia già presente.");
+    } else if (error) {
+      setFriendSearchMsg("Non riesco a inviare la richiesta. Riprova tra poco.");
+      setFriendDataMessage(t.friendshipLoadError);
+    } else {
+      setFriendSearchMsg("Richiesta inviata!");
+      setFriendSearchResult(null);
+      setFriendSearchEmail("");
+      await loadFriends(user);
+    }
   }
 
   async function respondToRequest(id, accept) {
-    await supabase.from("friendships").update({ status: accept ? "accepted" : "declined" }).eq("id", id);
+    const { error } = await supabase
+      .from("friendships")
+      .update({ status: accept ? "accepted" : "declined" })
+      .eq("id", id);
+    if (error) {
+      setFriendDataMessage(t.friendshipLoadError);
+      return;
+    }
     await loadFriends(user);
   }
 
   async function removeFriend(id) {
-    await supabase.from("friendships").delete().eq("id", id);
+    const { error } = await supabase.from("friendships").delete().eq("id", id);
+    if (error) {
+      setFriendDataMessage(t.friendshipLoadError);
+      return;
+    }
     await loadFriends(user);
   }
 
@@ -923,6 +1036,11 @@ export default function App() {
       if (!nextSession?.user) {
         setCards([]);
         setProfileUsername("");
+        setFriends([]);
+        setFriendRequests([]);
+        setSentFriendRequests([]);
+        setFriendDataMessage("");
+        setIsNotificationsOpen(false);
       }
     });
 
@@ -943,7 +1061,7 @@ export default function App() {
     }, 0);
 
     const relatedDataTimer = window.setTimeout(() => {
-      loadFriends(user);
+      loadFriends(user, { showLoading: true });
       loadSnapshots(user);
     }, 0);
 
@@ -963,10 +1081,38 @@ export default function App() {
       )
       .subscribe();
 
+    const friendshipChannel = supabase
+      .channel(`friendships-live-${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "friendships",
+        },
+        () => {
+          loadFriends(user);
+        }
+      )
+      .subscribe();
+
+    const refreshFriendData = () => {
+      if (document.visibilityState === "visible") {
+        loadFriends(user);
+      }
+    };
+    const friendRefreshTimer = window.setInterval(refreshFriendData, 15000);
+    window.addEventListener("focus", refreshFriendData);
+    document.addEventListener("visibilitychange", refreshFriendData);
+
     return () => {
       window.clearTimeout(loadTimer);
       window.clearTimeout(relatedDataTimer);
+      window.clearInterval(friendRefreshTimer);
+      window.removeEventListener("focus", refreshFriendData);
+      document.removeEventListener("visibilitychange", refreshFriendData);
       supabase.removeChannel(channel);
+      supabase.removeChannel(friendshipChannel);
     };
   }, [loadCards, loadFriends, loadSnapshots, user]);
 
@@ -1002,19 +1148,53 @@ export default function App() {
           </p>
         </div>
 
-        {/* Desktop Top-Right Profile Dropdown/Trigger */}
-        {!isMobile && (
-          <button 
-            type="button" 
-            onClick={() => setIsSettingsOpen(true)} 
-            style={desktopProfileTriggerStyle}
+        <div style={headerActionsStyle}>
+          <button
+            type="button"
+            onClick={() => {
+              const willOpen = !isNotificationsOpen;
+              setIsNotificationsOpen(willOpen);
+              if (willOpen) loadFriends(user, { showLoading: true });
+            }}
+            style={notificationTriggerStyle}
+            aria-expanded={isNotificationsOpen}
+            aria-label={`${t.notifications}: ${friendRequests.length}`}
           >
-            <div style={avatarStyle}>
-              {(profileUsername || user.email).slice(0, 2).toUpperCase()}
-            </div>
-            <span style={emailStyle}>{profileUsername || user.email}</span>
+            <span>{t.notifications}</span>
+            {friendRequests.length > 0 && (
+              <span style={notificationBadgeStyle}>{friendRequests.length}</span>
+            )}
           </button>
-        )}
+
+          {!isMobile && (
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              style={desktopProfileTriggerStyle}
+            >
+              <div style={avatarStyle}>
+                {(profileUsername || user.email).slice(0, 2).toUpperCase()}
+              </div>
+              <span style={emailStyle}>{profileUsername || user.email}</span>
+            </button>
+          )}
+
+          {isNotificationsOpen && (
+            <NotificationCenter
+              t={t}
+              requests={friendRequests}
+              busy={friendDataBusy}
+              message={friendDataMessage}
+              onRespond={respondToRequest}
+              onRefresh={() => loadFriends(user, { showLoading: true })}
+              onOpenFriends={() => {
+                setActiveTab("friends");
+                setIsNotificationsOpen(false);
+              }}
+              onClose={() => setIsNotificationsOpen(false)}
+            />
+          )}
+        </div>
       </header>
 
       {/* CONFETTI */}
@@ -1027,13 +1207,18 @@ export default function App() {
             onClick={() => setActiveTab(tab)}
             style={{ ...tabBtnStyle, ...(activeTab === tab ? tabBtnActiveStyle : {}) }}
           >
-            {tab === "collection"
-              ? t.collection
-              : tab === "duplicates"
-                ? t.duplicates
-                : tab === "friends"
-                  ? t.friends
-                  : t.progress}
+            <span style={tabLabelStyle}>
+              {tab === "collection"
+                ? t.collection
+                : tab === "duplicates"
+                  ? t.duplicates
+                  : tab === "friends"
+                    ? t.friends
+                    : t.progress}
+              {tab === "friends" && friendRequests.length > 0 && (
+                <span style={tabBadgeStyle}>{friendRequests.length}</span>
+              )}
+            </span>
           </button>
         ))}
       </div>
@@ -1055,6 +1240,9 @@ export default function App() {
           t={t}
           friends={friends}
           friendRequests={friendRequests}
+          sentFriendRequests={sentFriendRequests}
+          friendDataBusy={friendDataBusy}
+          friendDataMessage={friendDataMessage}
           friendSearchEmail={friendSearchEmail}
           setFriendSearchEmail={setFriendSearchEmail}
           friendSearchResult={friendSearchResult}
@@ -1063,6 +1251,7 @@ export default function App() {
           onSearch={searchFriendByNickname}
           onSendRequest={sendFriendRequest}
           onRespond={respondToRequest}
+          onRefresh={() => loadFriends(user, { showLoading: true })}
           onRemove={removeFriend}
           onViewFriend={loadFriendStats}
           viewingFriend={viewingFriend}
@@ -1325,6 +1514,9 @@ export default function App() {
                     : tab === "friends"
                       ? t.friends
                       : t.progress}
+                {tab === "friends" && friendRequests.length > 0 && (
+                  <span style={tabBadgeStyle}>{friendRequests.length}</span>
+                )}
               </span>
             </button>
           ))}
@@ -1590,6 +1782,54 @@ function CollectionCard({ group, ownershipMap, variantBusy, onAddCopy, onRemoveV
 
 function EmptyState({ text }) {
   return <div style={emptyStyle}>{text}</div>;
+}
+
+function NotificationCenter({ t, requests, busy, message, onRespond, onRefresh, onOpenFriends, onClose }) {
+  return (
+    <section style={notificationCenterStyle} aria-label={t.notifications}>
+      <div style={notificationHeaderStyle}>
+        <h2 style={{ ...sectionTitleStyle, fontSize: 17 }}>{t.notifications}</h2>
+        <button type="button" onClick={onClose} style={modalCloseButtonStyle}>X</button>
+      </div>
+      <div style={notificationBodyStyle}>
+        {message && <div style={{ ...messageStyle, marginBottom: 0 }}>{message}</div>}
+        {requests.length === 0 ? (
+          <div style={notificationEmptyStyle}>{busy ? t.loading : t.noPendingRequests}</div>
+        ) : (
+          requests.map((request) => {
+            const username =
+              request.requesterProfile?.username || request.requester_id.slice(0, 8);
+            return (
+              <div key={request.id} style={notificationItemStyle}>
+                <div>
+                  <div style={{ fontWeight: 800, color: "var(--text-heading)" }}>{username}</div>
+                  <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                    {t.pendingRequests}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button type="button" onClick={() => onRespond(request.id, true)} style={inlineFormSubmitStyle}>
+                    {t.accept}
+                  </button>
+                  <button type="button" onClick={() => onRespond(request.id, false)} style={bulkDeleteButtonStyle}>
+                    {t.decline}
+                  </button>
+                </div>
+              </div>
+            );
+          })
+        )}
+        <div style={notificationFooterStyle}>
+          <button type="button" onClick={onRefresh} style={inlineSettingButtonStyle}>
+            {busy ? t.loading : t.refresh}
+          </button>
+          <button type="button" onClick={onOpenFriends} style={inlineFormSubmitStyle}>
+            {t.friends}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 // Componente dedicato per il Modale Impostazioni
@@ -2247,9 +2487,10 @@ function ConfettiOverlay() {
 // ============================================================
 // FRIENDS PANEL
 // ============================================================
-function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, setFriendSearchEmail,
+function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, friendDataBusy,
+  friendDataMessage, friendSearchEmail, setFriendSearchEmail,
   friendSearchResult, friendSearchBusy, friendSearchMsg, onSearch, onSendRequest, onRespond,
-  onRemove, onViewFriend, viewingFriend, friendStats, onBackToMine, collectionCards,
+  onRefresh, onRemove, onViewFriend, viewingFriend, friendStats, onBackToMine, collectionCards,
   ownershipMap, friendMessages, friendMessagesBusy, friendMessageSending, friendMessageStatus,
   onSendMessage, onRefreshMessages, cardCatalog }) {
   const [tradeListOpen, setTradeListOpen] = useState(false);
@@ -2355,14 +2596,28 @@ function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, set
       </div>
 
       {/* Richieste in arrivo */}
-      {friendRequests.length > 0 && (
-        <div style={trackingPanelStyle}>
-          <h3 style={sectionTitleStyle}>{t.pendingRequests}</h3>
+      <div style={trackingPanelStyle}>
+        <div style={panelHeaderRowStyle}>
+          <h3 style={sectionTitleStyle}>
+            {t.pendingRequests}
+            {friendRequests.length > 0 && (
+              <span style={{ ...tabBadgeStyle, marginLeft: 8 }}>{friendRequests.length}</span>
+            )}
+          </h3>
+          <button type="button" onClick={onRefresh} disabled={friendDataBusy} style={{ ...inlineSettingButtonStyle, width: "auto", marginTop: 0 }}>
+            {friendDataBusy ? t.loading : t.refresh}
+          </button>
+        </div>
+        {friendDataMessage && <div style={messageStyle}>{friendDataMessage}</div>}
+        {friendRequests.length === 0 ? (
+          <div style={compactEmptyStyle}>{t.noPendingRequests}</div>
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
           {friendRequests.map(req => (
             <div key={req.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ ...avatarStyle, width: 34, height: 34, fontSize: 13 }}>{(req.profiles?.username || "?").slice(0,2).toUpperCase()}</div>
-                <span style={{ fontWeight: 800, color: "var(--text-heading)" }}>{req.profiles?.username || req.requester_id.slice(0,8)}</span>
+                <div style={{ ...avatarStyle, width: 34, height: 34, fontSize: 13 }}>{(req.requesterProfile?.username || "?").slice(0,2).toUpperCase()}</div>
+                <span style={{ fontWeight: 800, color: "var(--text-heading)" }}>{req.requesterProfile?.username || req.requester_id.slice(0,8)}</span>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button type="button" onClick={() => onRespond(req.id, true)} style={inlineFormSubmitStyle}>{t.accept}</button>
@@ -2370,8 +2625,32 @@ function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, set
               </div>
             </div>
           ))}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
+
+      <div style={trackingPanelStyle}>
+        <h3 style={sectionTitleStyle}>{t.sentRequests}</h3>
+        {sentFriendRequests.length === 0 ? (
+          <div style={compactEmptyStyle}>{t.noSentRequests}</div>
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {sentFriendRequests.map((request) => (
+              <div key={request.id} style={requestSummaryStyle}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ ...avatarStyle, width: 34, height: 34, fontSize: 13 }}>
+                    {(request.addresseeProfile?.username || "?").slice(0, 2).toUpperCase()}
+                  </div>
+                  <span style={{ fontWeight: 800, color: "var(--text-heading)" }}>
+                    {request.addresseeProfile?.username || request.addressee_id.slice(0, 8)}
+                  </span>
+                </div>
+                <span style={pendingPillStyle}>{t.pendingReply}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Lista amici */}
       <div style={trackingPanelStyle}>
@@ -2383,7 +2662,7 @@ function FriendsPanel({ user, t, friends, friendRequests, friendSearchEmail, set
             {friends.map(f => {
               const isRequester = f.requester_id === user.id;
               const friendId = isRequester ? f.addressee_id : f.requester_id;
-              const friendUsername = isRequester ? f["profiles!friendships_addressee_id_fkey"]?.username : f["profiles!friendships_requester_id_fkey"]?.username;
+              const friendUsername = f.friendProfile?.username;
               return (
                 <div key={f.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2825,6 +3104,93 @@ const emailStyle = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   maxWidth: 180,
+};
+
+const headerActionsStyle = {
+  position: "relative",
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const notificationTriggerStyle = {
+  minHeight: 48,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "9px 12px",
+  borderRadius: 50,
+  border: "1px solid var(--border)",
+  background: "var(--surface-1)",
+  color: "var(--text-primary)",
+  fontSize: 13,
+  fontWeight: 800,
+  cursor: "pointer",
+  boxShadow: "var(--card-shadow)",
+};
+
+const notificationBadgeStyle = {
+  display: "inline-grid",
+  placeItems: "center",
+  minWidth: 20,
+  height: 20,
+  padding: "0 5px",
+  borderRadius: 99,
+  background: "var(--danger-text)",
+  color: "#fff",
+  fontSize: 11,
+  fontWeight: 900,
+};
+
+const notificationCenterStyle = {
+  position: "absolute",
+  top: "calc(100% + 10px)",
+  right: 0,
+  zIndex: 1200,
+  width: "min(390px, calc(100vw - 24px))",
+  background: "var(--surface-3)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: 12,
+  overflow: "hidden",
+  boxShadow: "var(--modal-shadow)",
+};
+
+const notificationHeaderStyle = {
+  padding: "14px 16px",
+  borderBottom: "1px solid var(--border)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+};
+
+const notificationBodyStyle = {
+  display: "grid",
+  gap: 10,
+  padding: 12,
+};
+
+const notificationEmptyStyle = {
+  color: "var(--text-secondary)",
+  background: "var(--surface-2)",
+  borderRadius: 8,
+  padding: 14,
+  textAlign: "center",
+  fontSize: 13,
+};
+
+const notificationItemStyle = {
+  display: "grid",
+  gap: 10,
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 9,
+  padding: "10px 12px",
+};
+
+const notificationFooterStyle = {
+  display: "flex",
+  gap: 8,
 };
 
 const authPanelStyle = {
@@ -3523,6 +3889,66 @@ const tabBtnActiveStyle = {
   color: "var(--text-heading)",
   boxShadow: "0 1px 4px rgba(0,0,0,0.15)",
   fontWeight: 900,
+};
+
+const tabLabelStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+};
+
+const tabBadgeStyle = {
+  display: "inline-grid",
+  placeItems: "center",
+  minWidth: 18,
+  height: 18,
+  padding: "0 5px",
+  borderRadius: 99,
+  background: "var(--danger-text)",
+  color: "#fff",
+  fontSize: 11,
+  fontWeight: 900,
+  verticalAlign: "middle",
+};
+
+const panelHeaderRowStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  flexWrap: "wrap",
+  gap: 10,
+};
+
+const compactEmptyStyle = {
+  color: "var(--text-secondary)",
+  background: "var(--surface-2)",
+  border: "1px dashed var(--border)",
+  borderRadius: 9,
+  padding: 14,
+  fontSize: 13,
+};
+
+const requestSummaryStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 10,
+  padding: "10px 14px",
+  background: "var(--surface-2)",
+  borderRadius: 10,
+  border: "1px solid var(--border)",
+};
+
+const pendingPillStyle = {
+  background: "rgba(247,201,72,0.10)",
+  border: "1px solid rgba(247,201,72,0.30)",
+  color: "var(--accent-gold)",
+  padding: "5px 8px",
+  borderRadius: 99,
+  fontSize: 12,
+  fontWeight: 800,
 };
 
 // Dupe counter styles inside CollectionCard
