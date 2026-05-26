@@ -1,46 +1,27 @@
--- Fixed-message chat available only between accepted friends.
+-- Add explicit card-for-card trade proposals to the existing friends chat.
 
-create table if not exists public.friend_messages (
-  id uuid primary key default gen_random_uuid(),
-  sender_id uuid not null references auth.users (id) on delete cascade,
-  recipient_id uuid not null references auth.users (id) on delete cascade,
-  message_code text not null check (
+alter table public.friend_messages
+  add column if not exists offered_card_id text;
+
+alter table public.friend_messages
+  drop constraint if exists friend_messages_message_code_check;
+
+alter table public.friend_messages
+  add constraint friend_messages_message_code_check check (
     message_code in ('need_card', 'trade_offer', 'want_to_trade', 'great_collection', 'thanks')
-  ),
-  card_id text,
-  offered_card_id text,
-  created_at timestamptz not null default now(),
-  constraint friend_messages_different_users check (sender_id <> recipient_id),
-  constraint friend_messages_card_payload check (
+  );
+
+alter table public.friend_messages
+  drop constraint if exists friend_messages_card_payload;
+
+alter table public.friend_messages
+  add constraint friend_messages_card_payload check (
     (message_code = 'need_card' and card_id is not null and offered_card_id is null)
     or (message_code = 'trade_offer' and card_id is not null and offered_card_id is not null and card_id <> offered_card_id)
     or (message_code not in ('need_card', 'trade_offer') and card_id is null and offered_card_id is null)
-  )
-);
-
-alter table public.friend_messages enable row level security;
-revoke all on table public.friend_messages from anon;
-revoke all on table public.friend_messages from authenticated;
-grant select, insert on table public.friend_messages to authenticated;
-
-drop policy if exists "Friends can view quick messages" on public.friend_messages;
-drop policy if exists "Friends can send quick messages" on public.friend_messages;
-
-create policy "Friends can view quick messages"
-  on public.friend_messages for select to authenticated
-  using (
-    (select auth.uid()) in (sender_id, recipient_id)
-    and exists (
-      select 1
-      from public.friendships friendship
-      where friendship.status = 'accepted'
-        and (
-          (friendship.requester_id = friend_messages.sender_id and friendship.addressee_id = friend_messages.recipient_id)
-          or
-          (friendship.requester_id = friend_messages.recipient_id and friendship.addressee_id = friend_messages.sender_id)
-        )
-    )
   );
+
+drop policy if exists "Friends can send quick messages" on public.friend_messages;
 
 create policy "Friends can send quick messages"
   on public.friend_messages for insert to authenticated
@@ -51,8 +32,7 @@ create policy "Friends can send quick messages"
       message_code not in ('need_card', 'trade_offer')
       or (
         message_code = 'need_card'
-        and
-        exists (
+        and exists (
           select 1
           from public.collections available_card
           where available_card.user_id = friend_messages.recipient_id
@@ -95,23 +75,3 @@ create policy "Friends can send quick messages"
         )
     )
   );
-
-create index if not exists friend_messages_conversation_created_idx
-  on public.friend_messages (sender_id, recipient_id, created_at desc);
-
-create index if not exists friend_messages_recipient_id_idx
-  on public.friend_messages (recipient_id);
-
-do $$
-begin
-  if not exists (
-    select 1
-    from pg_publication_tables
-    where pubname = 'supabase_realtime'
-      and schemaname = 'public'
-      and tablename = 'friend_messages'
-  ) then
-    alter publication supabase_realtime add table public.friend_messages;
-  end if;
-end
-$$;

@@ -112,8 +112,17 @@ const T = {
     noMessages: "Nessun nuovo messaggio.",
     noUsefulDupes: "Nessun doppione utile segnalato.",
     openFriend: "Apri amico",
+    openChat: "Apri chat",
     messageReceived: "Nuovo messaggio",
     usefulDupeAlert: "Ha una carta doppia che ti manca",
+    clearNotices: "Pulisci avvisi",
+    dismiss: "Cancella",
+    requestsNeedAction: "Accetta o rifiuta le richieste per rimuoverle.",
+    tradeProposal: "Proposta di scambio",
+    requestedCard: "Carta richiesta",
+    offeredCard: "Carta offerta",
+    sendTradeProposal: "Proponi scambio",
+    noTradeCards: "Per proporre uno scambio servono doppioni in entrambe le collezioni.",
     progress: "Progressione",
     settings: "Impostazioni",
     more: "Menu",
@@ -191,8 +200,17 @@ const T = {
     noMessages: "No new messages.",
     noUsefulDupes: "No useful duplicates reported.",
     openFriend: "Open friend",
+    openChat: "Open chat",
     messageReceived: "New message",
     usefulDupeAlert: "Has a duplicate card you need",
+    clearNotices: "Clear notices",
+    dismiss: "Delete",
+    requestsNeedAction: "Accept or decline requests to remove them.",
+    tradeProposal: "Trade proposal",
+    requestedCard: "Requested card",
+    offeredCard: "Offered card",
+    sendTradeProposal: "Propose trade",
+    noTradeCards: "Both collections need duplicates to propose a trade.",
     progress: "Progress",
     settings: "Settings",
     more: "Menu",
@@ -265,11 +283,13 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [filterSection, setFilterSection] = useState("All");
   const [filterRarity, setFilterRarity] = useState("All");
+  const [filterStatus, setFilterStatus] = useState("All");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [variantBusy, setVariantBusy] = useState("");
   const [bulkBusy, setBulkBusy] = useState("");
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState("");
+  const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
 
   // Nuovi stati per Impostazioni, Tema e Responsività
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -300,6 +320,7 @@ export default function App() {
       return [];
     }
   });
+  const [dismissedNotificationIds, setDismissedNotificationIds] = useState([]);
   const [friendDataBusy, setFriendDataBusy] = useState(false);
   const [friendDataMessage, setFriendDataMessage] = useState("");
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
@@ -668,7 +689,7 @@ export default function App() {
 
     const { data, error } = await supabase
       .from("friend_messages")
-      .select("id,sender_id,recipient_id,message_code,card_id,created_at")
+      .select("id,sender_id,recipient_id,message_code,card_id,offered_card_id,created_at")
       .or(`and(sender_id.eq.${user.id},recipient_id.eq.${friendId}),and(sender_id.eq.${friendId},recipient_id.eq.${user.id})`)
       .order("created_at", { ascending: true })
       .limit(60);
@@ -682,9 +703,9 @@ export default function App() {
     setFriendMessagesBusy(false);
   }
 
-  async function sendFriendMessage(friendId, messageCode, cardId = null) {
-    if (!user || !friendId) return;
-    const pendingKey = `${messageCode}:${cardId || ""}`;
+  async function sendFriendMessage(friendId, messageCode, cardId = null, offeredCardId = null) {
+    if (!user || !friendId) return false;
+    const pendingKey = `${messageCode}:${cardId || ""}:${offeredCardId || ""}`;
     setFriendMessageSending(pendingKey);
     setFriendMessageStatus("");
 
@@ -692,15 +713,19 @@ export default function App() {
       sender_id: user.id,
       recipient_id: friendId,
       message_code: messageCode,
-      card_id: messageCode === "need_card" ? cardId : null,
+      card_id: ["need_card", "trade_offer"].includes(messageCode) ? cardId : null,
+      offered_card_id: messageCode === "trade_offer" ? offeredCardId : null,
     });
 
     if (error) {
       setFriendMessageStatus("Non riesco a inviare il messaggio.");
+      setFriendMessageSending("");
+      return false;
     } else {
       await loadFriendMessages(friendId);
     }
     setFriendMessageSending("");
+    return true;
   }
 
   // --- EXPORT CSV ---
@@ -804,6 +829,7 @@ export default function App() {
     if (!currentUser) {
       setReceivedFriendMessages([]);
       setUsefulDuplicateAlerts([]);
+      setDismissedNotificationIds([]);
       return;
     }
 
@@ -813,6 +839,7 @@ export default function App() {
     if (friendIds.length === 0) {
       setReceivedFriendMessages([]);
       setUsefulDuplicateAlerts([]);
+      setDismissedNotificationIds([]);
       setSocialNotificationsMessage("");
       setSocialNotificationsBusy(false);
       return;
@@ -821,11 +848,15 @@ export default function App() {
     if (showLoading) setSocialNotificationsBusy(true);
     setSocialNotificationsMessage("");
 
-    const [{ data: receivedMessages, error: messagesError }, { data: duplicateRows, error: duplicatesError }] =
+    const [
+      { data: receivedMessages, error: messagesError },
+      { data: duplicateRows, error: duplicatesError },
+      { data: dismissedRows, error: dismissalsError },
+    ] =
       await Promise.all([
         supabase
           .from("friend_messages")
-          .select("id,sender_id,recipient_id,message_code,card_id,created_at")
+          .select("id,sender_id,recipient_id,message_code,card_id,offered_card_id,created_at")
           .eq("recipient_id", currentUser.id)
           .in("sender_id", friendIds)
           .order("created_at", { ascending: false })
@@ -835,6 +866,11 @@ export default function App() {
           .select("user_id,card_id,rarity,dupes,updated_at")
           .in("user_id", friendIds)
           .gt("dupes", 0),
+        supabase
+          .from("notification_dismissals")
+          .select("notification_key")
+          .eq("user_id", currentUser.id)
+          .limit(500),
       ]);
 
     const profilesById = new Map(
@@ -879,7 +915,15 @@ export default function App() {
       );
     }
 
-    if (messagesError || duplicatesError) {
+    if (dismissalsError) {
+      setDismissedNotificationIds([]);
+    } else {
+      setDismissedNotificationIds(
+        (dismissedRows || []).map((dismissal) => dismissal.notification_key)
+      );
+    }
+
+    if (messagesError || duplicatesError || dismissalsError) {
       setSocialNotificationsMessage("Non riesco a caricare tutte le notifiche social.");
     }
     setSocialNotificationsBusy(false);
@@ -903,12 +947,31 @@ export default function App() {
     [seenSocialNotificationIds]
   );
 
+  const dismissedNotificationSet = useMemo(
+    () => new Set(Array.isArray(dismissedNotificationIds) ? dismissedNotificationIds : []),
+    [dismissedNotificationIds]
+  );
+
+  const visibleReceivedFriendMessages = useMemo(
+    () => receivedFriendMessages.filter(
+      (notification) => !dismissedNotificationSet.has(notification.notificationId)
+    ),
+    [dismissedNotificationSet, receivedFriendMessages]
+  );
+
+  const visibleUsefulDuplicateAlerts = useMemo(
+    () => usefulDuplicateAlerts.filter(
+      (notification) => !dismissedNotificationSet.has(notification.notificationId)
+    ),
+    [dismissedNotificationSet, usefulDuplicateAlerts]
+  );
+
   const unseenPassiveNotificationCount = useMemo(
     () =>
-      [...receivedFriendMessages, ...usefulDuplicateAlerts].filter(
+      [...visibleReceivedFriendMessages, ...visibleUsefulDuplicateAlerts].filter(
         (notification) => !seenNotificationSet.has(notification.notificationId)
       ).length,
-    [receivedFriendMessages, usefulDuplicateAlerts, seenNotificationSet]
+    [seenNotificationSet, visibleReceivedFriendMessages, visibleUsefulDuplicateAlerts]
   );
 
   const notificationCount = friendRequests.length + unseenPassiveNotificationCount;
@@ -923,7 +986,7 @@ export default function App() {
   useEffect(() => {
     if (!isNotificationsOpen) return;
 
-    const currentlyVisibleIds = [...receivedFriendMessages, ...usefulDuplicateAlerts].map(
+    const currentlyVisibleIds = [...visibleReceivedFriendMessages, ...visibleUsefulDuplicateAlerts].map(
       (notification) => notification.notificationId
     );
     if (currentlyVisibleIds.length === 0) return;
@@ -945,7 +1008,38 @@ export default function App() {
     }, 0);
 
     return () => window.clearTimeout(rememberTimer);
-  }, [isNotificationsOpen, receivedFriendMessages, usefulDuplicateAlerts]);
+  }, [isNotificationsOpen, visibleReceivedFriendMessages, visibleUsefulDuplicateAlerts]);
+
+  async function dismissNotifications(notificationIds) {
+    if (!user || notificationIds.length === 0) return;
+
+    const rows = notificationIds.map((notificationKey) => ({
+      user_id: user.id,
+      notification_key: notificationKey,
+    }));
+    const { error } = await supabase.from("notification_dismissals").upsert(rows, {
+      onConflict: "user_id,notification_key",
+      ignoreDuplicates: true,
+    });
+
+    if (error) {
+      setSocialNotificationsMessage("Non riesco a cancellare la notifica.");
+      return;
+    }
+
+    setDismissedNotificationIds((previousIds) =>
+      Array.from(new Set([...(previousIds || []), ...notificationIds]))
+    );
+    setSocialNotificationsMessage("");
+  }
+
+  async function clearPassiveNotifications() {
+    await dismissNotifications(
+      [...visibleReceivedFriendMessages, ...visibleUsefulDuplicateAlerts].map(
+        (notification) => notification.notificationId
+      )
+    );
+  }
 
   const displayCatalog = useMemo(() => {
     const knownCatalogIds = new Set(cardCatalog.map((card) => card.card_id));
@@ -1031,9 +1125,19 @@ export default function App() {
                 ownershipMap.has(variant.card_id)
             );
 
-      return matchesSearch && matchesSection && matchesRarity;
+      const hasDupes = group.variants.some((variant) => {
+        const ownedId = ownershipMap.get(variant.card_id);
+        return ownedId && (dupesMap.get(ownedId) || 0) > 0;
+      });
+      const matchesStatus =
+        filterStatus === "All" ||
+        (filterStatus === "Missing" && group.ownedCount < group.variantCount) ||
+        (filterStatus === "Complete" && group.ownedCount === group.variantCount) ||
+        (filterStatus === "Dupes" && hasDupes);
+
+      return matchesSearch && matchesSection && matchesRarity && matchesStatus;
     });
-  }, [cardGroups, filterRarity, filterSection, ownershipMap, search]);
+  }, [cardGroups, dupesMap, filterRarity, filterSection, filterStatus, ownershipMap, search]);
 
   const rarityStats = useMemo(() => {
     return RARITY_LABELS.reduce((acc, rarity) => {
@@ -1179,6 +1283,36 @@ export default function App() {
     await addVariant(variant);
   }
 
+  async function addMissingVariants(group) {
+    if (!user || variantBusy) return;
+
+    const missingVariants = group.variants.filter(
+      (variant) => !ownershipMap.has(variant.card_id)
+    );
+    if (missingVariants.length === 0) return;
+
+    setVariantBusy(`group:${group.id}`);
+    const { error } = await supabase.from("collections").upsert(
+      missingVariants.map((variant) => ({
+        user_id: user.id,
+        card_id: variant.card_id,
+        found: true,
+        dupes: 0,
+        rarity: variant.rarity,
+      })),
+      { onConflict: "user_id,card_id" }
+    );
+
+    if (error) {
+      setMessage(`Non riesco ad aggiungere le varianti mancanti di ${group.name}.`);
+    } else {
+      setMessage(`Aggiunte ${missingVariants.length} varianti di ${group.name}.`);
+      await loadCards(user, { showLoading: false });
+    }
+
+    setVariantBusy("");
+  }
+
   async function removeVariant(variant) {
     if (!user || variantBusy) return;
 
@@ -1296,6 +1430,7 @@ export default function App() {
         friendsRef.current = [];
         setReceivedFriendMessages([]);
         setUsefulDuplicateAlerts([]);
+        setDismissedNotificationIds([]);
         setSocialNotificationsMessage("");
         setFriendDataMessage("");
         setIsNotificationsOpen(false);
@@ -1480,14 +1615,16 @@ export default function App() {
             <NotificationCenter
               t={t}
               requests={friendRequests}
-              messages={receivedFriendMessages}
-              duplicateAlerts={usefulDuplicateAlerts}
+              messages={visibleReceivedFriendMessages}
+              duplicateAlerts={visibleUsefulDuplicateAlerts}
               seenIds={seenNotificationSet}
               cardCatalog={cardCatalog}
               isMobile={isMobile}
               busy={friendDataBusy || socialNotificationsBusy}
               message={friendDataMessage || socialNotificationsMessage}
               onRespond={respondToRequest}
+              onDismiss={(notificationId) => dismissNotifications([notificationId])}
+              onClear={clearPassiveNotifications}
               onRefresh={async () => {
                 const currentFriends = await loadFriends(user, { showLoading: true });
                 loadSocialNotificationsRef.current(user, currentFriends, { showLoading: true });
@@ -1662,12 +1799,22 @@ export default function App() {
       </section>
 
       <section style={bulkPanelStyle}>
-        <div>
-          <h2 style={sectionTitleStyle}>Divisione rarita</h2>
-          <p style={sectionTextStyle}>Ordine base: Tear C, Tear B, Tear A, Tear S.</p>
-        </div>
+        <button
+          type="button"
+          style={bulkPanelHeaderButtonStyle}
+          onClick={() => setBulkActionsOpen((open) => !open)}
+          aria-expanded={bulkActionsOpen}
+        >
+          <span>
+            <strong style={{ ...sectionTitleStyle, display: "block" }}>Gestione per rarita</strong>
+            <span style={bulkPanelSummaryStyle}>
+              Aggiungi o elimina molte varianti solo quando ti serve.
+            </span>
+          </span>
+          <span style={expandIndicatorStyle}>{bulkActionsOpen ? "-" : "+"}</span>
+        </button>
 
-        <div style={bulkGridStyle}>
+        {bulkActionsOpen && <div style={bulkGridStyle}>
           {RARITY_DEFINITIONS.map((rarity) => {
             const stats = rarityStats[rarity.label] || { owned: 0, total: 0 };
             const addDisabled = bulkBusy === rarity.label || stats.owned === stats.total;
@@ -1695,8 +1842,9 @@ export default function App() {
                       borderColor: `${rarity.color}80`,
                       opacity: addDisabled ? 0.55 : 1,
                     }}
+                    title={`Aggiungi tutte le varianti mancanti ${rarity.label}`}
                   >
-                    {bulkBusy === rarity.label ? "Aggiunta..." : "Aggiungi mancanti"}
+                    {bulkBusy === rarity.label ? "..." : "+ Mancanti"}
                   </button>
 
                   <button
@@ -1707,16 +1855,17 @@ export default function App() {
                       ...bulkDeleteButtonStyle,
                       opacity: deleteDisabled ? 0.55 : 1,
                     }}
+                    title={`Elimina tutte le varianti possedute ${rarity.label}`}
                   >
                     {bulkDeleteBusy === rarity.label
-                      ? "Elimino..."
-                      : "Elimina possedute"}
+                      ? "..."
+                      : "Elimina"}
                   </button>
                 </div>
               </div>
             );
           })}
-        </div>
+        </div>}
       </section>
 
       <section style={toolbarStyle}>
@@ -1724,7 +1873,7 @@ export default function App() {
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Cerca carta..."
-          style={{ ...inputStyle, flex: 1, minWidth: isMobile ? "100%" : 220, fontSize: 18 }}
+          style={{ ...inputStyle, ...compactFilterInputStyle, flex: 1, minWidth: isMobile ? "100%" : 220 }}
         />
 
         <select
@@ -1733,7 +1882,7 @@ export default function App() {
             setFilterSection(event.target.value);
             setFilterRarity("All");
           }}
-          style={{ ...inputStyle, fontSize: 18 }}
+          style={{ ...inputStyle, ...compactFilterInputStyle }}
           aria-label="Filtra set"
         >
           <option value="All">Tutti i set</option>
@@ -1747,7 +1896,7 @@ export default function App() {
         <select
           value={filterRarity}
           onChange={(event) => setFilterRarity(event.target.value)}
-          style={{ ...inputStyle, fontSize: 18 }}
+          style={{ ...inputStyle, ...compactFilterInputStyle }}
           aria-label="Filtra rarita"
         >
           <option value="All">Tutte le rarita</option>
@@ -1760,6 +1909,18 @@ export default function App() {
             </option>
           ))}
         </select>
+
+        <select
+          value={filterStatus}
+          onChange={(event) => setFilterStatus(event.target.value)}
+          style={{ ...inputStyle, ...compactFilterInputStyle }}
+          aria-label="Filtra stato collezione"
+        >
+          <option value="All">Tutti gli stati</option>
+          <option value="Missing">Da completare</option>
+          <option value="Complete">Complete</option>
+          <option value="Dupes">Con doppioni</option>
+        </select>
       </section>
 
       {message ? <div style={messageStyle}>{message}</div> : null}
@@ -1770,6 +1931,10 @@ export default function App() {
           <span style={gridCountStyle}>
             {filteredGroups.length}/{cardGroups.length}
           </span>
+        </div>
+        <div style={compactCardLegendStyle}>
+          <span><strong>- / +</strong> gestisce i doppioni</span>
+          <span><strong>x</strong> rimuove la variante</span>
         </div>
 
         {loading ? (
@@ -1782,6 +1947,7 @@ export default function App() {
             ownershipMap={ownershipMap}
             variantBusy={variantBusy}
             onAddCopy={addCopy}
+            onAddMissingVariants={addMissingVariants}
             onRemoveVariant={removeVariant}
             dupesMap={dupesMap}
             onDecrementDupe={decrementDupe}
@@ -1938,8 +2104,10 @@ function StatCard({ title, value, total, color }) {
   );
 }
 
-function SectionedCardGrid({ groups, ownershipMap, variantBusy, onAddCopy, onRemoveVariant, dupesMap, onDecrementDupe, t }) {
-  const [collapsed, setCollapsed] = useState({});
+function SectionedCardGrid({ groups, ownershipMap, variantBusy, onAddCopy, onAddMissingVariants, onRemoveVariant, dupesMap, onDecrementDupe, t }) {
+  const [collapsed, setCollapsed] = useState(() =>
+    Object.fromEntries(COLLECTION_SECTIONS.map((section) => [section.key, true]))
+  );
 
   // Raggruppa per sezione mantenendo l'ordine
   const sections = useMemo(() => {
@@ -1987,6 +2155,7 @@ function SectionedCardGrid({ groups, ownershipMap, variantBusy, onAddCopy, onRem
                     ownershipMap={ownershipMap}
                     variantBusy={variantBusy}
                     onAddCopy={onAddCopy}
+                    onAddMissingVariants={onAddMissingVariants}
                     onRemoveVariant={onRemoveVariant}
                     dupesMap={dupesMap}
                     onDecrementDupe={onDecrementDupe}
@@ -2002,13 +2171,15 @@ function SectionedCardGrid({ groups, ownershipMap, variantBusy, onAddCopy, onRem
   );
 }
 
-function CollectionCard({ group, ownershipMap, variantBusy, onAddCopy, onRemoveVariant, dupesMap, onDecrementDupe }) {
+function CollectionCard({ group, ownershipMap, variantBusy, onAddCopy, onAddMissingVariants, onRemoveVariant, dupesMap, onDecrementDupe }) {
   const activeVariant =
     group.variants.find((variant) => ownershipMap.has(variant.card_id)) ||
     group.variants[0];
   const activeColor = getRarityMeta(activeVariant.rarity).color;
   const imageSeed = encodeURIComponent(`${group.section}-${group.name}`);
   const isOwned = group.ownedCount > 0;
+  const missingVariantCount = group.variantCount - group.ownedCount;
+  const groupBusy = variantBusy === `group:${group.id}`;
 
   return (
     <article
@@ -2035,54 +2206,72 @@ function CollectionCard({ group, ownershipMap, variantBusy, onAddCopy, onRemoveV
           </span>
         </div>
 
+        {group.section === "special" && missingVariantCount > 0 && (
+          <button
+            type="button"
+            style={addMissingVariantsButtonStyle}
+            onClick={() => onAddMissingVariants(group)}
+            disabled={groupBusy}
+          >
+            {groupBusy ? "Aggiunta..." : `Aggiungi mancanti (${missingVariantCount})`}
+          </button>
+        )}
+
         <div style={rarityPipGridStyle}>
           {group.variants.map((variant) => {
             const rarity = getRarityMeta(variant.rarity);
             const active = ownershipMap.has(variant.card_id);
-            const busy = variantBusy === variant.card_id;
+            const busy = groupBusy || variantBusy === variant.card_id;
             const dupes = dupesMap?.get(variant.card_id) || 0;
 
             return (
-              <div key={variant.card_id} style={variantControlStyle}>
+              <div
+                key={variant.card_id}
+                style={getRarityPipStyle(rarity.color, active, busy)}
+              >
+                <span style={{ ...rarityCodeStyle, color: active ? rarity.color : "var(--text-secondary)" }}>
+                  <span style={getRarityDotStyle(rarity.color, active)} />
+                  <span>{rarity.short}</span>
+                </span>
+                <span style={dupeCountStyle} title={active ? "Doppioni posseduti" : "Variante mancante"}>
+                  {active ? `x${dupes}` : "--"}
+                </span>
+                <div style={dupeRowStyle}>
+                  {active && (
+                    <button
+                      type="button"
+                      style={{ ...dupeSmallBtnStyle, opacity: dupes === 0 ? 0.45 : 1 }}
+                      onClick={() => onDecrementDupe(variant)}
+                      disabled={busy || dupes === 0}
+                      aria-label={`Rimuovi un doppione ${group.name} ${variant.rarity}`}
+                      title="Rimuovi una doppia"
+                    >
+                      -
+                    </button>
+                  )}
                 <button
                   type="button"
                   title={active ? `${variant.rarity}: aggiungi una doppia` : `${variant.rarity}: aggiungi carta`}
                   aria-label={active ? `${group.name} ${variant.rarity}, aggiungi doppia` : `${group.name} ${variant.rarity}, aggiungi`}
                   onClick={() => onAddCopy(variant)}
                   disabled={busy}
-                  style={getRarityPipStyle(rarity.color, active, busy)}
+                    style={{ ...dupeSmallBtnStyle, ...addCompactVariantButtonStyle, borderColor: `${rarity.color}80` }}
                 >
-                  <span style={rarityCodeStyle}>
-                    <span style={getRarityDotStyle(rarity.color, active)} />
-                    <span>{rarity.short}</span>
-                  </span>
-                  <span style={variantActionStyle}>{active ? "+ Doppia" : "Aggiungi"}</span>
+                    +
                 </button>
                 {active && (
-                  <>
-                    <span style={dupeCountStyle}>Doppie: {dupes}</span>
-                    <div style={dupeRowStyle}>
-                      <button
-                        type="button"
-                        style={{ ...dupeSmallBtnStyle, opacity: dupes === 0 ? 0.45 : 1 }}
-                        onClick={() => onDecrementDupe(variant)}
-                        disabled={busy || dupes === 0}
-                        title="Rimuovi una doppia"
-                      >
-                        -1
-                      </button>
                       <button
                         type="button"
                         style={removeVariantButtonStyle}
                         onClick={() => onRemoveVariant(variant)}
                         disabled={busy}
+                        aria-label={`Rimuovi ${group.name} ${variant.rarity} dalla collezione`}
                         title="Rimuovi la carta e le sue doppie"
                       >
-                        Rimuovi
+                        x
                       </button>
-                    </div>
-                  </>
                 )}
+                </div>
               </div>
             );
           })}
@@ -2107,6 +2296,8 @@ function NotificationCenter({
   busy,
   message,
   onRespond,
+  onDismiss,
+  onClear,
   onRefresh,
   onOpenFriend,
   onOpenFriends,
@@ -2114,6 +2305,7 @@ function NotificationCenter({
 }) {
   const hasNotifications =
     requests.length > 0 || messages.length > 0 || duplicateAlerts.length > 0;
+  const hasClearableNotifications = messages.length > 0 || duplicateAlerts.length > 0;
 
   return (
     <section
@@ -2146,16 +2338,17 @@ function NotificationCenter({
                     <div style={notificationMetaStyle}>{t.pendingRequests}</div>
                   </div>
                   <div style={notificationActionStyle}>
-                    <button type="button" onClick={() => onRespond(request.id, true)} style={inlineFormSubmitStyle}>
+                    <button type="button" onClick={() => onRespond(request.id, true)} style={compactConfirmButtonStyle}>
                       {t.accept}
                     </button>
-                    <button type="button" onClick={() => onRespond(request.id, false)} style={bulkDeleteButtonStyle}>
+                    <button type="button" onClick={() => onRespond(request.id, false)} style={compactDismissButtonStyle}>
                       {t.decline}
                     </button>
                   </div>
                 </div>
               );
             })}
+            <div style={notificationHintStyle}>{t.requestsNeedAction}</div>
           </section>
         )}
 
@@ -2172,20 +2365,31 @@ function NotificationCenter({
                   <div style={notificationContentStyle}>
                     <div style={notificationTitleRowStyle}>
                       <strong style={{ color: "var(--text-heading)" }}>{username}</strong>
+                      <span style={notificationKindPillStyle}>
+                        {notification.message_code === "trade_offer" ? t.tradeProposal : t.messages}
+                      </span>
                       {isUnread && <span style={newNotificationPillStyle}>Nuovo</span>}
                     </div>
-                    <div style={notificationMetaStyle}>{t.messageReceived}</div>
                     <div style={notificationTextStyle}>
                       {quickMessageText(notification, cardCatalog)}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onOpenFriend(notification.friendId)}
-                    style={{ ...inlineSettingButtonStyle, width: "auto", marginTop: 0 }}
-                  >
-                    {t.openFriend}
-                  </button>
+                  <div style={notificationActionStyle}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenFriend(notification.friendId)}
+                      style={compactConfirmButtonStyle}
+                    >
+                      {t.openChat}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDismiss(notification.notificationId)}
+                      style={compactDismissButtonStyle}
+                    >
+                      {t.dismiss}
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -2205,20 +2409,29 @@ function NotificationCenter({
                   <div style={notificationContentStyle}>
                     <div style={notificationTitleRowStyle}>
                       <strong style={{ color: "var(--text-heading)" }}>{username}</strong>
+                      <span style={notificationKindPillStyle}>{t.usefulDupes}</span>
                       {isUnread && <span style={newNotificationPillStyle}>Nuovo</span>}
                     </div>
-                    <div style={notificationMetaStyle}>{t.usefulDupeAlert}</div>
                     <div style={notificationTextStyle}>
-                      {notification.name} - {notification.rarity} ({notification.dupes})
+                      Ti serve {notification.name} - {notification.rarity}; ne ha {notification.dupes} in piu.
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onOpenFriend(notification.friendId)}
-                    style={{ ...inlineSettingButtonStyle, width: "auto", marginTop: 0 }}
-                  >
-                    {t.openFriend}
-                  </button>
+                  <div style={notificationActionStyle}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenFriend(notification.friendId)}
+                      style={compactConfirmButtonStyle}
+                    >
+                      {t.openChat}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDismiss(notification.notificationId)}
+                      style={compactDismissButtonStyle}
+                    >
+                      {t.dismiss}
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -2226,10 +2439,15 @@ function NotificationCenter({
         )}
 
         <div style={notificationFooterStyle}>
-          <button type="button" onClick={onRefresh} style={inlineSettingButtonStyle}>
+          {hasClearableNotifications && (
+            <button type="button" onClick={onClear} style={compactDismissButtonStyle}>
+              {t.clearNotices}
+            </button>
+          )}
+          <button type="button" onClick={onRefresh} style={compactNoticeButtonStyle}>
             {busy ? t.loading : t.refresh}
           </button>
-          <button type="button" onClick={onOpenFriends} style={inlineFormSubmitStyle}>
+          <button type="button" onClick={onOpenFriends} style={compactConfirmButtonStyle}>
             {t.friends}
           </button>
         </div>
@@ -2738,16 +2956,27 @@ function duplicateSectionDescriptor(card) {
 
 function quickMessageText(message, catalog) {
   if (message.message_code === "need_card") {
-    const cardName =
-      catalog.find((card) => card.card_id === message.card_id)?.name ||
-      deriveNameFromCardId(message.card_id, "");
+    const cardName = messageCardName(message.card_id, catalog);
     return `Mi serve ${cardName}. Possiamo scambiarla?`;
+  }
+
+  if (message.message_code === "trade_offer") {
+    const requestedCard = messageCardName(message.card_id, catalog);
+    const offeredCard = messageCardName(message.offered_card_id, catalog);
+    return `Proposta: ti offro ${offeredCard} per ${requestedCard}.`;
   }
 
   return (
     QUICK_MESSAGE_TEMPLATES.find((template) => template.code === message.message_code)?.text ||
     "Messaggio rapido"
   );
+}
+
+function messageCardName(cardId, catalog) {
+  const card = catalog.find((catalogCard) => catalogCard.card_id === cardId);
+  return card
+    ? `${card.name} (${card.rarity})`
+    : deriveNameFromCardId(cardId, "");
 }
 
 function sanitizeManualName(name) {
@@ -2821,20 +3050,17 @@ function slugify(value) {
 function getRarityPipStyle(color, active, busy) {
   return {
     width: "100%",
-    minHeight: 58,
-    borderRadius: 8,
-    border: active ? `2px solid ${color}` : "1px solid var(--border-strong)",
-    background: active ? color : "var(--surface-2)",
-    color: active ? "#080a0f" : "var(--text-primary)",
-    cursor: busy ? "wait" : "pointer",
-    display: "flex",
-    flexDirection: "column",
+    minHeight: 32,
+    borderRadius: 6,
+    border: active ? `1px solid ${color}66` : "1px solid var(--border)",
+    background: active ? `${color}12` : "var(--surface-2)",
+    display: "grid",
+    gridTemplateColumns: "28px 26px minmax(0, 1fr)",
     alignItems: "center",
-    justifyContent: "center",
     gap: 3,
     fontWeight: 900,
-    fontSize: 12,
-    padding: "6px 4px",
+    fontSize: 11,
+    padding: 3,
     opacity: busy ? 0.6 : 1,
     transition: "background 0.18s ease, border-color 0.18s ease, opacity 0.18s ease",
   };
@@ -2845,8 +3071,9 @@ function getRarityDotStyle(color, active) {
     width: 8,
     height: 8,
     borderRadius: 2,
-    background: active ? "#080a0f" : color,
-    opacity: active ? 0.9 : 0.7,
+    background: active ? color : "transparent",
+    border: `1px solid ${color}`,
+    opacity: active ? 1 : 0.7,
   };
 }
 
@@ -2966,6 +3193,7 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
         </div>
 
         <FriendQuickChat
+          t={t}
           friendId={viewingFriend}
           friendName={friendStats.username}
           userId={user.id}
@@ -2974,6 +3202,8 @@ function FriendsPanel({ user, t, friends, friendRequests, sentFriendRequests, fr
           sending={friendMessageSending}
           status={friendMessageStatus}
           cardCatalog={cardCatalog}
+          myDuplicateCards={collectionCards.filter((card) => (card.dupes || 0) > 0)}
+          friendDuplicateCards={(friendStats.cards || []).filter((card) => (card.dupes || 0) > 0)}
           isMobile={isMobile}
           onSend={onSendMessage}
           onRefresh={onRefreshMessages}
@@ -3209,7 +3439,7 @@ function TradeOfferSections({ sections, friendId, sending, onRequest }) {
                     <div style={compactTradeVariantListStyle}>
                       {group.variants.map((variant) => {
                         const meta = getRarityMeta(variant.rarity);
-                        const pendingKey = `need_card:${variant.card_id}`;
+                        const pendingKey = `need_card:${variant.card_id}:`;
                         return (
                           <div key={variant.card_id} style={compactTradeVariantStyle}>
                             <span style={{ ...compactVariantBadgeStyle, borderColor: `${meta.color}66`, color: meta.color }}>
@@ -3238,7 +3468,22 @@ function TradeOfferSections({ sections, friendId, sending, onRequest }) {
   );
 }
 
-function FriendQuickChat({ friendId, friendName, userId, messages, loading, sending, status, cardCatalog, isMobile, onSend, onRefresh }) {
+function FriendQuickChat({ t, friendId, friendName, userId, messages, loading, sending, status, cardCatalog, myDuplicateCards, friendDuplicateCards, isMobile, onSend, onRefresh }) {
+  const [requestedCardId, setRequestedCardId] = useState("");
+  const [offeredCardId, setOfferedCardId] = useState("");
+  const tradePendingKey = `trade_offer:${requestedCardId}:${offeredCardId}`;
+  const canSendTrade =
+    requestedCardId && offeredCardId && requestedCardId !== offeredCardId;
+
+  async function sendTradeProposal() {
+    if (!canSendTrade) return;
+    const sent = await onSend(friendId, "trade_offer", requestedCardId, offeredCardId);
+    if (sent) {
+      setRequestedCardId("");
+      setOfferedCardId("");
+    }
+  }
+
   return (
     <section style={{ ...trackingPanelStyle, ...(isMobile ? mobilePanelStyle : {}) }}>
       <div style={chatHeaderStyle}>
@@ -3253,7 +3498,7 @@ function FriendQuickChat({ friendId, friendName, userId, messages, loading, send
 
       <div style={quickMessageButtonsStyle}>
         {QUICK_MESSAGE_TEMPLATES.map((template) => {
-          const pendingKey = `${template.code}:`;
+          const pendingKey = `${template.code}::`;
           return (
             <button
               key={template.code}
@@ -3267,6 +3512,61 @@ function FriendQuickChat({ friendId, friendName, userId, messages, loading, send
           );
         })}
       </div>
+
+      <section style={tradeComposerStyle}>
+        <div>
+          <h4 style={tradeComposerTitleStyle}>{t.tradeProposal}</h4>
+          <p style={tradeComposerDescriptionStyle}>
+            Seleziona un suo doppione e una carta doppia che vuoi offrire.
+          </p>
+        </div>
+        {myDuplicateCards.length === 0 || friendDuplicateCards.length === 0 ? (
+          <div style={notificationHintStyle}>{t.noTradeCards}</div>
+        ) : (
+          <>
+            <div style={tradeSelectGridStyle}>
+              <label style={tradeSelectLabelStyle}>
+                {t.requestedCard}
+                <select
+                  value={requestedCardId}
+                  onChange={(event) => setRequestedCardId(event.target.value)}
+                  style={{ ...inputStyle, width: "100%", fontSize: 14 }}
+                >
+                  <option value="">Scegli il doppione dell'amico...</option>
+                  {friendDuplicateCards.map((card) => (
+                    <option key={card.card_id} value={card.card_id}>
+                      {card.name} - {card.rarity} ({card.dupes})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={tradeSelectLabelStyle}>
+                {t.offeredCard}
+                <select
+                  value={offeredCardId}
+                  onChange={(event) => setOfferedCardId(event.target.value)}
+                  style={{ ...inputStyle, width: "100%", fontSize: 14 }}
+                >
+                  <option value="">Scegli il tuo doppione...</option>
+                  {myDuplicateCards.map((card) => (
+                    <option key={card.card_id} value={card.card_id}>
+                      {card.name} - {card.rarity} ({card.dupes})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <button
+              type="button"
+              style={{ ...inlineFormSubmitStyle, width: "fit-content" }}
+              onClick={sendTradeProposal}
+              disabled={!canSendTrade || sending === tradePendingKey}
+            >
+              {sending === tradePendingKey ? "Invio..." : t.sendTradeProposal}
+            </button>
+          </>
+        )}
+      </section>
 
       {status && <div style={messageStyle}>{status}</div>}
 
@@ -3621,7 +3921,7 @@ const notificationCenterStyle = {
   top: "calc(100% + 10px)",
   right: 0,
   zIndex: 1200,
-  width: "min(390px, calc(100vw - 24px))",
+  width: "min(360px, calc(100vw - 24px))",
   background: "var(--surface-3)",
   border: "1px solid var(--border-strong)",
   borderRadius: 12,
@@ -3641,7 +3941,7 @@ const mobileNotificationCenterStyle = {
 };
 
 const notificationHeaderStyle = {
-  padding: "14px 16px",
+  padding: "11px 12px",
   borderBottom: "1px solid var(--border)",
   display: "flex",
   alignItems: "center",
@@ -3651,8 +3951,8 @@ const notificationHeaderStyle = {
 
 const notificationBodyStyle = {
   display: "grid",
-  gap: 10,
-  padding: 12,
+  gap: 8,
+  padding: 9,
   maxHeight: "min(62vh, 560px)",
   overflowY: "auto",
 };
@@ -3668,11 +3968,11 @@ const notificationEmptyStyle = {
 
 const notificationItemStyle = {
   display: "grid",
-  gap: 10,
+  gap: 6,
   background: "var(--surface-2)",
   border: "1px solid var(--border)",
   borderRadius: 9,
-  padding: "10px 12px",
+  padding: "8px 9px",
 };
 
 const notificationGroupStyle = {
@@ -3691,7 +3991,7 @@ const notificationGroupTitleStyle = {
 
 const notificationMetaStyle = {
   color: "var(--text-secondary)",
-  fontSize: 12,
+  fontSize: 11,
 };
 
 const notificationActionStyle = {
@@ -3704,6 +4004,45 @@ const notificationContentStyle = {
   display: "grid",
   gap: 3,
   minWidth: 0,
+};
+
+const notificationHintStyle = {
+  color: "var(--text-secondary)",
+  fontSize: 11,
+  lineHeight: 1.35,
+};
+
+const compactNoticeButtonStyle = {
+  background: "var(--surface-1)",
+  border: "1px solid var(--border)",
+  color: "var(--text-primary)",
+  padding: "6px 9px",
+  borderRadius: 7,
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const compactConfirmButtonStyle = {
+  background: "var(--success-bg)",
+  border: "1px solid var(--success-border)",
+  color: "var(--success-text)",
+  padding: "6px 9px",
+  borderRadius: 7,
+  fontSize: 12,
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const compactDismissButtonStyle = {
+  background: "var(--danger-bg)",
+  border: "1px solid var(--danger-border)",
+  color: "var(--danger-text)",
+  padding: "6px 9px",
+  borderRadius: 7,
+  fontSize: 12,
+  fontWeight: 800,
+  cursor: "pointer",
 };
 
 const notificationTitleRowStyle = {
@@ -3719,6 +4058,16 @@ const notificationTextStyle = {
   overflowWrap: "anywhere",
 };
 
+const notificationKindPillStyle = {
+  background: "var(--surface-1)",
+  border: "1px solid var(--border)",
+  color: "var(--text-secondary)",
+  borderRadius: 99,
+  padding: "2px 6px",
+  fontSize: 10,
+  fontWeight: 800,
+};
+
 const newNotificationPillStyle = {
   background: "var(--success-bg)",
   border: "1px solid var(--success-border)",
@@ -3732,6 +4081,7 @@ const newNotificationPillStyle = {
 const notificationFooterStyle = {
   display: "flex",
   gap: 8,
+  flexWrap: "wrap",
 };
 
 const authPanelStyle = {
@@ -3956,13 +4306,35 @@ const trackingNumbersStyle = {
 
 const bulkPanelStyle = {
   background: "var(--surface-1)",
-  padding: 20,
+  padding: 12,
   borderRadius: 12,
   border: "1px solid var(--border)",
   marginBottom: 16,
   display: "grid",
-  gap: 16,
+  gap: 10,
   boxShadow: "var(--card-shadow)",
+};
+
+const bulkPanelHeaderButtonStyle = {
+  width: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+  padding: 0,
+  border: "none",
+  background: "transparent",
+  color: "var(--text-primary)",
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+const bulkPanelSummaryStyle = {
+  display: "block",
+  marginTop: 4,
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 600,
 };
 
 const sectionTitleStyle = {
@@ -3981,17 +4353,17 @@ const sectionTextStyle = {
 
 const bulkGridStyle = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 190px),1fr))",
-  gap: 10,
+  gridTemplateColumns: "repeat(auto-fit,minmax(min(100%, 150px),1fr))",
+  gap: 7,
 };
 
 const bulkActionCardStyle = {
   background: "var(--surface-2)",
   border: "1px solid var(--border)",
-  borderRadius: 10,
-  padding: 12,
+  borderRadius: 8,
+  padding: 8,
   display: "grid",
-  gap: 10,
+  gap: 7,
 };
 
 const bulkActionHeaderStyle = {
@@ -4002,35 +4374,37 @@ const bulkActionHeaderStyle = {
 };
 
 const bulkActionButtonsStyle = {
-  display: "grid",
-  gap: 8,
+  display: "flex",
+  gap: 5,
 };
 
 const bulkButtonStyle = {
   background: "var(--success-bg)",
   border: "1px solid var(--success-border)",
   color: "var(--success-text)",
-  padding: 11,
-  borderRadius: 8,
+  padding: "6px 7px",
+  borderRadius: 6,
   cursor: "pointer",
   fontWeight: 800,
-  fontSize: 13,
+  fontSize: 11,
+  flex: 1,
 };
 
 const bulkDeleteButtonStyle = {
   background: "var(--danger-bg)",
   border: "1px solid var(--danger-border)",
   color: "var(--danger-text)",
-  padding: 11,
-  borderRadius: 8,
+  padding: "6px 7px",
+  borderRadius: 6,
   cursor: "pointer",
   fontWeight: 800,
-  fontSize: 13,
+  fontSize: 11,
+  flex: 1,
 };
 
 const bulkCountStyle = {
   color: "var(--text-secondary)",
-  fontSize: 13,
+  fontSize: 11,
   fontWeight: 700,
 };
 
@@ -4055,6 +4429,12 @@ const inputStyle = {
   appearance: "none",
   touchAction: "manipulation",
   minHeight: 50,
+};
+
+const compactFilterInputStyle = {
+  padding: "9px 11px",
+  minHeight: 40,
+  fontSize: 14,
 };
 
 const buttonStyle = {
@@ -4093,6 +4473,15 @@ const cardBrowserHeaderStyle = {
   marginBottom: 12,
 };
 
+const compactCardLegendStyle = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: "6px 14px",
+  color: "var(--text-secondary)",
+  fontSize: 11,
+  margin: "-5px 0 10px",
+};
+
 const gridCountStyle = {
   color: "var(--text-secondary)",
   fontWeight: 800,
@@ -4101,8 +4490,8 @@ const gridCountStyle = {
 
 const cardGridStyle = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fill,minmax(min(100%, 200px),1fr))",
-  gap: 12,
+  gridTemplateColumns: "repeat(auto-fill,minmax(min(100%, 176px),1fr))",
+  gap: 9,
 };
 
 const collectionCardStyle = {
@@ -4118,7 +4507,7 @@ const collectionCardStyle = {
 
 const cardImageWrapStyle = {
   position: "relative",
-  aspectRatio: "4 / 3",
+  aspectRatio: "2 / 1",
   background: "var(--surface-2)",
   overflow: "hidden",
 };
@@ -4149,9 +4538,9 @@ const sectionBadgeStyle = {
 };
 
 const collectionCardBodyStyle = {
-  padding: 12,
+  padding: 7,
   display: "grid",
-  gap: 10,
+  gap: 7,
 };
 
 const collectionCardTopStyle = {
@@ -4164,7 +4553,7 @@ const collectionCardTopStyle = {
 const collectionCardTitleStyle = {
   color: "var(--text-heading)",
   margin: 0,
-  fontSize: 15,
+  fontSize: 14,
   lineHeight: 1.2,
   fontWeight: 800,
   letterSpacing: 0,
@@ -4184,8 +4573,7 @@ const cardCountPillStyle = {
 
 const rarityPipGridStyle = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit,minmax(86px,1fr))",
-  gap: 8,
+  gap: 4,
 };
 
 const sectionFolderHeaderStyle = {
@@ -4521,35 +4909,35 @@ const pendingPillStyle = {
   fontWeight: 800,
 };
 
-// Dupe counter styles inside CollectionCard
-const variantControlStyle = {
-  display: "grid",
-  alignContent: "start",
-  gap: 5,
-  minWidth: 0,
+const addMissingVariantsButtonStyle = {
+  background: "var(--success-bg)",
+  border: "1px solid var(--success-border)",
+  color: "var(--success-text)",
+  borderRadius: 7,
+  padding: "7px 8px",
+  fontSize: 12,
+  fontWeight: 800,
+  cursor: "pointer",
 };
 
 const rarityCodeStyle = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 6,
-};
-
-const variantActionStyle = {
+  gap: 4,
   fontSize: 11,
   fontWeight: 800,
 };
 
 const dupeRowStyle = {
-  display: "grid",
-  gridTemplateColumns: "32px minmax(0, 1fr)",
+  display: "flex",
+  justifyContent: "flex-end",
   alignItems: "center",
-  gap: 4,
+  gap: 3,
 };
 
 const dupeSmallBtnStyle = {
-  width: 32,
-  height: 28,
+  width: 22,
+  height: 24,
   borderRadius: 4,
   border: "1px solid var(--border-strong)",
   background: "var(--surface-1)",
@@ -4565,22 +4953,28 @@ const dupeSmallBtnStyle = {
 };
 
 const dupeCountStyle = {
-  fontSize: 12,
+  fontSize: 10,
   fontWeight: 900,
   color: "var(--accent-gold)",
   textAlign: "center",
 };
 
+const addCompactVariantButtonStyle = {
+  background: "var(--success-bg)",
+  color: "var(--success-text)",
+};
+
 const removeVariantButtonStyle = {
-  minHeight: 28,
+  width: 22,
+  height: 24,
   borderRadius: 4,
   border: "1px solid var(--danger-border)",
   background: "var(--danger-bg)",
   color: "var(--danger-text)",
-  fontSize: 11,
+  fontSize: 12,
   fontWeight: 800,
   cursor: "pointer",
-  padding: "3px 5px",
+  padding: 0,
 };
 
 const duplicatesLayoutStyle = {
@@ -4953,6 +5347,42 @@ const chatThreadStyle = {
   display: "grid",
   gap: 8,
   paddingTop: 4,
+};
+
+const tradeComposerStyle = {
+  display: "grid",
+  gap: 10,
+  background: "var(--surface-2)",
+  border: "1px solid var(--border)",
+  borderRadius: 10,
+  padding: 12,
+};
+
+const tradeComposerTitleStyle = {
+  margin: 0,
+  color: "var(--text-heading)",
+  fontSize: 15,
+  fontWeight: 900,
+};
+
+const tradeComposerDescriptionStyle = {
+  margin: "4px 0 0",
+  color: "var(--text-secondary)",
+  fontSize: 12,
+};
+
+const tradeSelectGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))",
+  gap: 8,
+};
+
+const tradeSelectLabelStyle = {
+  display: "grid",
+  gap: 5,
+  color: "var(--text-secondary)",
+  fontSize: 12,
+  fontWeight: 800,
 };
 
 const chatBubbleStyle = {
